@@ -63,7 +63,7 @@ def select_longest(candidates):
     result = None
     maxlen = -1
     for candidate in candidates:
-        length = len(candidate.path)
+        length = candidate.region.size()
         if length > maxlen:
             result = candidate
             maxlen = length
@@ -286,7 +286,7 @@ class gidopen_context(sublime_plugin.TextCommand):
         pwd, folders, labels = self._setup_folders()
         return pwd
 
-    def _expand_region(self, prefix_region, suffix):
+    def _expand_right(self, prefix_region, suffix):
         # type: (sublime.Region, str) -> sublime.Region|None
         begin = prefix_region.end()
         end = begin + len(suffix)
@@ -309,7 +309,7 @@ class gidopen_context(sublime_plugin.TextCommand):
                     )
                     del dirnames[i]
                 else:
-                    region = self._expand_region(folder_region, path[dlen:])
+                    region = self._expand_right(folder_region, path[dlen:])
                     if region:
                         yield FolderFound(region, path)
                         # descend into this folder
@@ -320,7 +320,7 @@ class gidopen_context(sublime_plugin.TextCommand):
 
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
-                region = self._expand_region(folder_region, path[dlen:])
+                region = self._expand_right(folder_region, path[dlen:])
                 if region:
                     yield FileFound(region, path)
 
@@ -337,7 +337,7 @@ class gidopen_context(sublime_plugin.TextCommand):
                 if name.startswith(p):
                     path = os.path.join(d, name)
                     suffix = path[len(prefix):]
-                    region = self._expand_region(prefix_region, suffix)
+                    region = self._expand_right(prefix_region, suffix)
                     if region:
                         if os.path.isdir(path):
                             if name in self._folder_excludes:
@@ -476,79 +476,124 @@ class gidopen_context(sublime_plugin.TextCommand):
             # we only have a basename, so we need to search *basename*.
             # To keep this fast, we only match in folders and pwd, only
             # descending into them if they continue to match.
-            for folder in self._folder_iterate():
-                print('GidOpen: - in', self._shorten_name(folder))
-                for name in os.listdir(folder):
-                    fullpath = os.path.join(folder, name)
-                    for idx in find_all(basename, name):
-                        # matched name starts `idx` chars before basename
-                        text_start = begin - idx
-                        text_end = text_start + len(name)
-                        text_region = sublime.Region(text_start, text_end)
-                        text = self.view.substr(text_region)
-                        if text == name:
-                            if os.path.isdir(fullpath):
-                                yield FolderFound(text_region, fullpath)
-                                if self.view.substr(text_end) == '/':
-                                    yield from self.all_matching_descendants(
-                                        fullpath, text_region
-                                    )
-                            elif os.path.isfile(fullpath):
-                                yield FileFound(text_region, fullpath)
+            for candidate in self._search_contains(region, basename):
+                candidate.region = self._expand_left(
+                    candidate.region, os.path.dirname(candidate.path)
+                )
+                yield candidate
         else:
             # we have a / before the basename, so we can search basename*. As
             # this is faster, we do a recursive search on folders and pwd.
+            basename_start = end - len(basename)
+            basename_region = sublime.Region(basename_start, end)
 
-            # First, search in the folders and pwd
-            for folder in self._folder_iterate():
-                print('GidOpen: - in', self._shorten_name(folder))
-                if os.path.isdir(folder):
-                    prefix = os.path.join(folder, basename)
-                    for name in os.listdir(folder):
-                        if name.startswith(basename):
-                            path = os.path.join(folder, name)
-                            suffix = path[len(prefix):]
-                            cregion = self._expand_region(region, suffix)
-                            if cregion:
-                                if os.path.isdir(path):
-                                    if name in self._folder_excludes:
-                                        print(
-                                            'GidOpen: - skip',
-                                            self._shorten_name(path),
-                                        )
-                                    else:
-                                        yield FolderFound(cregion, path)
+            for candidate in self._search_prefix(basename_region, basename):
+                candidate.region = self._expand_left(
+                    candidate.region, os.path.dirname(candidate.path)
+                )
+                yield candidate
+
+    def _expand_left(self, region, dirname):
+        # type: (sublime.Region, str) -> sublime.Region
+        # when we have a region that matches the basename, expand left to
+        # find the matching directories, updating the region.
+        match_start = region.begin()
+        pos = match_start - 1
+        while dirname != '/' and pos >= 0 and self.view.substr(pos) == '/':
+            if pos >= 1 and self.view.substr(pos - 1) == '/':
+                pos -= 1
+                continue
+            if (
+                pos >= 2
+                and self.view.substr(sublime.Region(pos - 2, pos)) == '/.'
+            ):
+                pos -= 2
+                continue
+            dirname, basename = os.path.split(dirname)
+            blen = len(basename)
+            if pos < blen:
+                break
+            if self.view.substr(sublime.Region(pos - blen, pos)) != basename:
+                break
+            match_start = pos - blen
+            pos = match_start - 1
+        return sublime.Region(match_start, region.end())
+
+    def _search_contains(self, region, basename):
+        # (sublime.Region, str) -> Iterator[Candidate]
+        begin = region.begin()
+        for folder in self._folder_iterate():
+            print('GidOpen: - in', self._shorten_name(folder))
+            for name in os.listdir(folder):
+                fullpath = os.path.join(folder, name)
+                for idx in find_all(basename, name):
+                    # matched name starts `idx` chars before basename
+                    text_start = begin - idx
+                    text_end = text_start + len(name)
+                    text_region = sublime.Region(text_start, text_end)
+                    text = self.view.substr(text_region)
+                    if text == name:
+                        if os.path.isdir(fullpath):
+                            yield FolderFound(text_region, fullpath)
+                            if self.view.substr(text_end) == '/':
+                                yield from self.all_matching_descendants(
+                                    fullpath, text_region
+                                )
+                        elif os.path.isfile(fullpath):
+                            yield FileFound(text_region, fullpath)
+
+    def _search_prefix(self, region, basename):
+        # (sublime.Region, str) -> Iterator[Candidate]
+        # First, search in the folders and pwd
+        for folder in self._folder_iterate():
+            print('GidOpen: - in', self._shorten_name(folder))
+            if os.path.isdir(folder):
+                prefix = os.path.join(folder, basename)
+                for name in os.listdir(folder):
+                    if name.startswith(basename):
+                        path = os.path.join(folder, name)
+                        suffix = path[len(prefix):]
+                        cregion = self._expand_right(region, suffix)
+                        if cregion:
+                            if os.path.isdir(path):
+                                if name in self._folder_excludes:
+                                    print(
+                                        'GidOpen: - skip',
+                                        self._shorten_name(path),
+                                    )
                                 else:
-                                    yield FileFound(region, path)
+                                    yield FolderFound(cregion, path)
+                            else:
+                                yield FileFound(cregion, path)
 
-            # Second, search under folders
-            home = self._get_home()
-            pwd = self._get_pwd()
-            for folder in self._folder_iterate(yield_pwd_in_folder=False):
-                if folder == home or is_in(home, folder):
-                    # too big to search recursively
-                    continue
+        # Second, search under folders
+        home = self._get_home()
+        pwd = self._get_pwd()
+        for folder in self._folder_iterate(yield_pwd_in_folder=False):
+            if folder == home or is_in(home, folder):
+                # too big to search recursively
+                continue
 
-                print('GidOpen: - under', self._shorten_name(folder))
-                for dirpath, dirnames, filenames in os.walk(folder):
-                    i = 0
-                    while i < len(dirnames):
-                        dirname = dirnames[i]
-                        path = os.path.join(dirpath, dirname)
-                        if path == pwd:
-                            # already searched in pwd, but still need to
-                            # search below pwd, so keep in dirnames
-                            i += 1
-                        elif dirname in self._folder_excludes:
-                            print(
-                                'GidOpen: - skip',
-                                self._shorten_name(path)
-                            )
-                            del dirnames[i]
-                        else:
-                            path = os.path.join(path, basename)
-                            yield from self.all_files_prefixed_by(path, region)
-                            i += 1
+            print('GidOpen: - under', self._shorten_name(folder))
+            for dirpath, dirnames, filenames in os.walk(folder):
+                i = 0
+                while i < len(dirnames):
+                    dirname = dirnames[i]
+                    path = os.path.join(dirpath, dirname)
+                    if path == pwd:
+                        # already searched in pwd, but still need to
+                        # search below pwd, so keep in dirnames
+                        i += 1
+                    elif dirname in self._folder_excludes:
+                        print(
+                            'GidOpen: - skip',
+                            self._shorten_name(path)
+                        )
+                        del dirnames[i]
+                    else:
+                        path = os.path.join(path, basename)
+                        yield from self.all_files_prefixed_by(path, region)
+                        i += 1
 
     def _best(self, options):
         return select_longest(options)
