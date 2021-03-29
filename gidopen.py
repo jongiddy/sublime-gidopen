@@ -498,48 +498,57 @@ class gidopen_context(sublime_plugin.TextCommand):
         else:
             # we have a / before the basename, so we can search basename*. As
             # this is faster, we do a recursive search on folders and pwd.
-            home = self._get_home()
-            for folder in self._folder_iterate(yield_pwd_in_folder=False):
-                # TODO: if home == folder or is_in(home, folder), just search
-                # in the folder, not under it
-                if folder == home or is_in(home, folder):
-                    # too big, just search in folder
-                    print('GidOpen: - in', self._shorten_name(folder))
-                    if os.path.isdir(folder):
-                        prefix = os.path.join(folder, basename)
-                        for name in os.listdir(folder):
-                            if name.startswith(basename):
-                                path = os.path.join(folder, name)
-                                suffix = path[len(prefix):]
-                                cregion = self._expand_region(region, suffix)
-                                if cregion:
-                                    if os.path.isdir(path):
-                                        if name in self._folder_excludes:
-                                            print(
-                                                'GidOpen: - skip',
-                                                self._shorten_name(path),
-                                            )
-                                        else:
-                                            yield FolderFound(cregion, path)
+
+            # First, search in the folders and pwd
+            for folder in self._folder_iterate():
+                print('GidOpen: - in', self._shorten_name(folder))
+                if os.path.isdir(folder):
+                    prefix = os.path.join(folder, basename)
+                    for name in os.listdir(folder):
+                        if name.startswith(basename):
+                            path = os.path.join(folder, name)
+                            suffix = path[len(prefix):]
+                            cregion = self._expand_region(region, suffix)
+                            if cregion:
+                                if os.path.isdir(path):
+                                    if name in self._folder_excludes:
+                                        print(
+                                            'GidOpen: - skip',
+                                            self._shorten_name(path),
+                                        )
                                     else:
-                                        yield FileFound(region, path)
-                else:
-                    print('GidOpen: - under', self._shorten_name(folder))
-                    for dirpath, dirnames, filenames in os.walk(folder):
-                        path = os.path.join(dirpath, basename)
-                        yield from self.all_files_prefixed_by(path, region)
-                        # remove excluded directories from search
-                        i = 0
-                        while i < len(dirnames):
-                            if dirnames[i] in self._folder_excludes:
-                                path = os.path.join(dirpath, dirnames[i])
-                                print(
-                                    'GidOpen: - skip',
-                                    self._shorten_name(path)
-                                )
-                                del dirnames[i]
-                            else:
-                                i += 1
+                                        yield FolderFound(cregion, path)
+                                else:
+                                    yield FileFound(region, path)
+
+            # Second, search under folders
+            home = self._get_home()
+            pwd = self._get_pwd()
+            for folder in self._folder_iterate(yield_pwd_in_folder=False):
+                if folder == home or is_in(home, folder):
+                    # too big to search recursively
+                    continue
+
+                print('GidOpen: - under', self._shorten_name(folder))
+                for dirpath, dirnames, filenames in os.walk(folder):
+                    i = 0
+                    while i < len(dirnames):
+                        dirname = dirnames[i]
+                        path = os.path.join(dirpath, dirname)
+                        if path == pwd:
+                            # already searched in pwd, but still need to
+                            # search below pwd, so keep in dirnames
+                            i += 1
+                        elif dirname in self._folder_excludes:
+                            print(
+                                'GidOpen: - skip',
+                                self._shorten_name(path)
+                            )
+                            del dirnames[i]
+                        else:
+                            path = os.path.join(path, basename)
+                            yield from self.all_files_prefixed_by(path, region)
+                            i += 1
 
     def _best(self, options):
         return select_longest(options)
