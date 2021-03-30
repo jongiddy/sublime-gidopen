@@ -177,6 +177,7 @@ def get_line_col(view, pos):
 
 
 CONTEXT_ACTION_FOLDER_ADD = 'Add Folder'
+CONTEXT_ACTION_FOLDER_REVEAL = 'Reveal'
 CONTEXT_ACTION_FOLDER_FIND = 'Find'
 CONTEXT_ACTION_FILE_OPEN = 'Open'
 CONTEXT_ACTION_FILE_GOTO = 'Goto'
@@ -488,10 +489,31 @@ class gidopen_context(sublime_plugin.TextCommand):
             basename_region = sublime.Region(basename_start, end)
 
             for candidate in self._search_prefix(basename_region, basename):
-                candidate.region = self._expand_left(
+                region = self._expand_left(
                     candidate.region, os.path.dirname(candidate.path)
                 )
-                yield candidate
+                if region == candidate.region:
+                    # A pathname-like string that only matches the basename
+                    # and no parent folders is likely to be a coincidental
+                    # use of similar names.  Only yield these if they have
+                    # a form like `./filename`.
+                    do_yield = False
+                    begin = region.begin()
+                    if begin == 2:
+                        s = self.view.substr(sublime.Region(0, 2))
+                        if s == './':
+                            do_yield = True
+                    elif begin > 2:
+                        s = self.view.substr(sublime.Region(begin - 3, begin))
+                        if s[1:] == './' and not is_likely_path_char(s[0]):
+                            do_yield = True
+                else:
+                    candidate.region = region
+                    do_yield = True
+
+                if do_yield:
+                    # Only yield candidates that match at least one directory
+                    yield candidate
 
     def _expand_left(self, region, dirname):
         # type: (sublime.Region, str) -> sublime.Region
@@ -681,9 +703,8 @@ class gidopen_context(sublime_plugin.TextCommand):
                 if candidate is not None:
                     path = candidate.path
                     if self._folder_in_project(path):
-                        action = None
-                        path = None
-                        label = None
+                        action = CONTEXT_ACTION_FOLDER_REVEAL
+                        label = self._shorten_name(path)
                     else:
                         action = CONTEXT_ACTION_FOLDER_ADD
                         label = self._shorten_name(path)
@@ -723,35 +744,25 @@ class gidopen_context(sublime_plugin.TextCommand):
         window = self.view.window()
         if action == CONTEXT_ACTION_FOLDER_ADD:
             add_folder_to_project(window, path)
-        elif action == CONTEXT_ACTION_FOLDER_FIND:
-            window.run_command(
-                'show_overlay',
-                {'overlay': 'goto', 'show_files': True, 'text': path}
-            )
-
-            # self.view.run_command('refresh_folder_list')
-            # tmpfile = os.path.join(path, 'aa.')
-            # with open(tmpfile, 'w'):
-            #     pass
-            # view = window.open_file(tmpfile, 0)
-            # view.window().run_command('reveal_in_side_bar')
-            # view.window().run_command("close_file")
-
-            # for name in os.listdir(path):
-            #     file = os.path.join(path, name)
-            #     if os.path.isfile(file):
-            #         view = window.open_file(file, 0)
-            #         sublime.active_window().run_command('reveal_in_side_bar')
-            #         # view.window().run_command("close_file")
-            #         break
-
-            # sublime.active_window().run_command(
-            #     # 'side_bar_open_in_new_window',
-            #     'side_bar_reveal',
-            #     {
-            #         'paths': [path],
-            #     }
-            # )
+        elif action == CONTEXT_ACTION_FOLDER_REVEAL:
+            # ST does not support revealing a folder, so we find a file that
+            # should be close to the top of the folder's file list.
+            for dirpath, dirnames, filenames in os.walk(path):
+                if filenames:
+                    # Sort filenames so we find one near the top of the folder
+                    names = sorted(filenames, key=str.casefold)
+                    filepath = os.path.join(dirpath, names[0])
+                    print('GidOpen: reveal', self._shorten_name(filepath))
+                    view = window.find_open_file(filepath)
+                    if view is None:
+                        view = window.open_file(filepath, 0)
+                    else:
+                        window.focus_view(view)
+                    view.window().run_command('reveal_in_side_bar')
+                    break
+                # If the folder does not contain any files, go into the
+                # subfolders in sorted order.
+                dirnames.sort(key=str.casefold)
         elif action == CONTEXT_ACTION_FOLDER_NEW:
             os.mkdir(path)
             if not self._folder_in_project(path):

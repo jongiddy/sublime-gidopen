@@ -187,6 +187,65 @@ class TestGidOpenPoint(TestCase):
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.file_present)
 
+    def test_match_partial_path(self):
+        gc = gidopen.gidopen_context(self.view)
+
+        parent = os.path.basename(os.path.dirname(self.file_present))
+
+        self.view.run_command(
+            'append', {'characters': parent + '/present', 'force': True}
+        )
+        x, y = self.view.text_to_window(self.view.size() - 2)
+        event = {'x': x, 'y': y}
+        message = gc.description(event)
+        action, path = self.view.settings().get('gidopen_context')
+        self.assertTrue(gc.is_visible(event))
+        self.assertEqual(
+            message,
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+        )
+        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+        self.assertEqual(path, self.file_present)
+
+    def test_match_partial_path_and_mismatch(self):
+        # A path can start with different parents, as long as the basename and
+        # its parent are present.
+        gc = gidopen.gidopen_context(self.view)
+
+        parent = os.path.basename(os.path.dirname(self.file_present))
+
+        self.view.run_command(
+            'append',
+            {'characters': '/notexist/' + parent + '/present', 'force': True}
+        )
+        x, y = self.view.text_to_window(self.view.size() - 2)
+        event = {'x': x, 'y': y}
+        message = gc.description(event)
+        action, path = self.view.settings().get('gidopen_context')
+        self.assertTrue(gc.is_visible(event))
+        self.assertEqual(
+            message,
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+        )
+        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+        self.assertEqual(path, self.file_present)
+
+    def test_match_basename_only(self):
+        # If the view text is a path containing a slash, then we don't match
+        # only on the basename.  We need at least one directory to match.
+        gc = gidopen.gidopen_context(self.view)
+
+        self.view.run_command(
+            'append', {'characters': 'nomatch/present', 'force': True}
+        )
+        x, y = self.view.text_to_window(self.view.size() - 2)
+        event = {'x': x, 'y': y}
+        gc.description(event)
+        action, path = self.view.settings().get('gidopen_context')
+        self.assertFalse(gc.is_visible(event))
+        self.assertEqual(action, None)
+        self.assertEqual(path, None)
+
     def test_tilde_path_existing(self):
         tilde_file = os.path.join(self.tmpdir, '~4.txt')
         with open(tilde_file, 'w'):
