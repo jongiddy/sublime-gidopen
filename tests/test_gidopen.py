@@ -53,6 +53,13 @@ class TestGidOpenPoint(TestCase):
         self.also_present = os.path.join(self.tmpdir, 'also present')
         with open(self.also_present, 'w'):
             pass
+        self.tilde_file = os.path.join(self.tmpdir, '~4.txt')
+        with open(self.tilde_file, 'w'):
+            pass
+        self.atypical_file = os.path.join(self.tmpdir, 'file [x86].txt')
+        with open(self.atypical_file, 'w'):
+            pass
+
         home = os.environ['HOME']
         tilde_file = None
         for basename in os.listdir(home):
@@ -65,476 +72,352 @@ class TestGidOpenPoint(TestCase):
         self.home_base = basename
         self.home_present = tilde_file
 
-        self.view = sublime.active_window().new_file()
-        settings = self.view.settings()
-        settings.set('gidopen_pwd', self.tmpdir)
         # make sure we have a window to work with
         s = sublime.load_settings("Preferences.sublime-settings")
         s.set("close_windows_when_empty", False)
 
     def tearDown(self):
-        if self.view:
-            self.view.set_scratch(True)
-            self.view.window().focus_view(self.view)
-            self.view.window().run_command("close_file")
         shutil.rmtree(self.tmpdir)
 
-    def test_empty_area_hides_menu(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command('append', {'characters': '   \n', 'force': True})
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        gc.description(event)
-        self.assertFalse(gc.is_visible(event))
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertEqual(action, None)
-        self.assertEqual(path, None)
-
-    def test_absolute_path_nonexisting_file(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': self.file_absent, 'force': True}
+    def samples_no_candidates(self):
+        return (
+            '   \n',              # no path characters
+            self.file_absent,     # directory exists, but file does not
+            '/tmp/noexist/file',  # directory does not exist
+            'absent',             # relative file does not exist
+            # Even though `present` does exist, the fact that even one
+            # level of hierarchy doesn't match means it's more likely
+            # coincidence than a real match
+            'nomatch/present',
+            '/tmp/nomatch/present',
         )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        gc.description(event)
-        self.assertFalse(gc.is_visible(event))
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertEqual(action, None)
-        self.assertEqual(path, None)
 
-    def test_absolute_path_nonexisting_directory(self):
-        gc = gidopen.gidopen_context(self.view)
+    def test_no_candidates(self):
+        for text in self.samples_no_candidates():
+            view = sublime.active_window().new_file()
+            try:
+                settings = view.settings()
+                settings.set('gidopen_pwd', self.tmpdir)
+                gc = gidopen.gidopen_context(view)
 
-        self.view.run_command(
-            'append', {'characters': '/tmp/noexist/file', 'force': True}
+                view.run_command('append', {'characters': text, 'force': True})
+                for pos in range(view.size() + 1):
+                    x, y = view.text_to_window(pos)
+                    event = {'x': x, 'y': y}
+                    gc.description(event)
+                    action, path = view.settings().get('gidopen_context')
+                    self.assertFalse(gc.is_visible(event), (text, pos))
+                    self.assertEqual(action, None, (text, pos))
+                    self.assertEqual(path, None, (text, pos))
+            finally:
+                view.set_scratch(True)
+                view.window().focus_view(view)
+                view.window().run_command("close_file")
+
+    def samples_open_candidates(self):
+        dirname = os.path.dirname(self.file_present)
+        parent = os.path.basename(dirname)
+        present = os.path.basename(self.file_present)
+        return (
+            (self.file_present, self.file_present),  # absolute path
+            (present, self.file_present),  # basename only relative
+            ('./' + present, self.file_present),  # dot-slash relative
+            (parent + '/' + present, self.file_present),
+            ('./' + parent + '/' + present, self.file_present),
+            (parent + '/./' + present, self.file_present),
+            (dirname + '/./' + present, self.file_present),
+            # Can match an absolute path with different hierarchy as long as
+            # basename and first parent match.  This is common:
+            # - when tasks run inside containers
+            # - in Go code where URL's represent the code hierarchy
+            ('/notexist/' + parent + '/' + present, self.file_present),
+            # A filename that starts with ~ but is not pointing to a home
+            # directory can be matched
+            (self.tilde_file, self.tilde_file),
+            (os.path.basename(self.tilde_file), self.tilde_file),
+            # Files with spaces can be matched. This also demonstrates that
+            # the longer match wins (`also present` beats `present`)
+            (self.also_present, self.also_present),
+            (os.path.basename(self.also_present), self.also_present),
+            # Files with two atypical characters in sequence can be matched.
+            (self.atypical_file, self.atypical_file),
+            (os.path.basename(self.atypical_file), self.atypical_file),
         )
-        x, y = self.view.text_to_window(self.view.size() - 8)
-        event = {'x': x, 'y': y}
-        gc.description(event)
-        self.assertFalse(gc.is_visible(event))
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertEqual(action, None)
-        self.assertEqual(path, None)
 
-    def test_relative_path_nonexisting(self):
-        gc = gidopen.gidopen_context(self.view)
+    def test_open_candidates(self):
+        for text, filename in self.samples_open_candidates():
+            view = sublime.active_window().new_file()
+            try:
+                settings = view.settings()
+                settings.set('gidopen_pwd', self.tmpdir)
+                gc = gidopen.gidopen_context(view)
 
-        self.view.run_command(
-            'append', {'characters': 'absent', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        gc.description(event)
-        self.assertFalse(gc.is_visible(event))
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertEqual(action, None)
-        self.assertEqual(path, None)
-
-    def test_absolute_path_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': self.file_present, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_relative_path_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': 'present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_dot_slash_path_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': './present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_match_partial_path(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        parent = os.path.basename(os.path.dirname(self.file_present))
-
-        self.view.run_command(
-            'append', {'characters': parent + '/present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_match_partial_path_and_mismatch(self):
-        # A path can start with different parents, as long as the basename and
-        # its parent are present.
-        gc = gidopen.gidopen_context(self.view)
-
-        parent = os.path.basename(os.path.dirname(self.file_present))
-
-        self.view.run_command(
-            'append',
-            {'characters': '/notexist/' + parent + '/present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_match_basename_only(self):
-        # If the view text is a path containing a slash, then we don't match
-        # only on the basename.  We need at least one directory to match.
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': 'nomatch/present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertFalse(gc.is_visible(event))
-        self.assertEqual(action, None)
-        self.assertEqual(path, None)
-
-    def test_tilde_path_existing(self):
-        tilde_file = os.path.join(self.tmpdir, '~4.txt')
-        with open(tilde_file, 'w'):
-            pass
-
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': '~4.txt', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, tilde_file)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, tilde_file)
+                view.run_command('append', {'characters': text, 'force': True})
+                for pos in range(view.size() + 1):
+                    x, y = view.text_to_window(pos)
+                    event = {'x': x, 'y': y}
+                    message = gc.description(event)
+                    action, path = view.settings().get('gidopen_context')
+                    self.assertTrue(gc.is_visible(event), (text, pos))
+                    self.assertEqual(message, '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, filename), (text, pos))
+                    self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN, (text, pos))
+                    self.assertEqual(path, filename, (text, pos))
+            finally:
+                view.set_scratch(True)
+                view.window().focus_view(view)
+                view.window().run_command("close_file")
 
     def test_tilde_home_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-        home_base = os.path.basename(self.home_present)
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+            home_base = os.path.basename(self.home_present)
 
-        self.view.run_command(
-            'append', {'characters': '~/' + home_base, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.home_present)
-
-    def test_unbraced_env_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-        home_base = os.path.basename(self.home_present)
-
-        self.view.run_command(
-            'append', {'characters': '$HOME/' + home_base, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.home_present)
-
-    def test_braced_env_existing(self):
-        gc = gidopen.gidopen_context(self.view)
-        home_base = os.path.basename(self.home_present)
-
-        self.view.run_command(
-            'append', {'characters': '${HOME}/' + home_base, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.home_present)
-
-    def test_click_after_space(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': self.also_present, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(
-                gidopen.CONTEXT_ACTION_FILE_OPEN, self.also_present
+            view.run_command(
+                'append', {'characters': '~/' + home_base, 'force': True}
             )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.also_present)
-
-    def test_click_before_space(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': self.also_present, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 12)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(
-                gidopen.CONTEXT_ACTION_FILE_OPEN, self.also_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.also_present)
-
-    def test_return_longer_of_two_names(self):
-        # Clicking on point that matches two names returns the longer name
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': 'also present', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(
-                gidopen.CONTEXT_ACTION_FILE_OPEN, self.also_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.also_present)
-
-    def test_absolute_path_with_row(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': self.file_present + ':12', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 5)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}:12'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
-        self.assertEqual(path, self.file_present + ':12:0')
-
-    def test_relative_path_with_row(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': 'present:12', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 5)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}:12'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
-        self.assertEqual(path, self.file_present + ':12:0')
-
-    def test_absolute_path_with_row_column(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {
-                'characters': self.file_present + ':12:34', 'force': True
-            }
-        )
-        x, y = self.view.text_to_window(self.view.size() - 8)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}:12:34'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
-        self.assertEqual(path, self.file_present + ':12:34')
-
-    def test_relative_path_with_row_column(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': 'present:12:34', 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 8)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}:12:34'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
-            )
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
-        self.assertEqual(path, self.file_present + ':12:34')
-
-    def test_file_from_set_environment_variable(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {
-                'characters': 'ENVNAME={}\n'.format(self.file_present),
-                'force': True
-            }
-        )
-        x, y = self.view.text_to_window(self.view.size() - 4)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_file_at_end_of_sentence(self):
-        gc = gidopen.gidopen_context(self.view)
-
-        # Extra dot does not confuse matcher
-        sentence = 'Open the file {}.'.format(self.file_present)
-        self.view.run_command(
-            'append', {'characters': sentence, 'force': True}
-        )
-        x, y = self.view.text_to_window(self.view.size() - 2)
-        event = {'x': x, 'y': y}
-        message = gc.description(event)
-        action, path = self.view.settings().get('gidopen_context')
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(
-            message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
-        )
-        self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-        self.assertEqual(path, self.file_present)
-
-    def test_two_atypical_characters(self):
-        # Create a file with two atypical path characters (` [`) in a row.
-        # Test that a path with multiple atypical characters can be found
-        # even when the click occurs between the two atypical characters
-        filename = os.path.join(self.tmpdir, 'file [x86].txt')
-        with open(filename, 'w'):
-            pass
-
-        gc = gidopen.gidopen_context(self.view)
-
-        self.view.run_command(
-            'append', {'characters': filename, 'force': True}
-        )
-        for pos in range(self.view.size() + 1):
-            x, y = self.view.text_to_window(pos)
+            x, y = view.text_to_window(view.size() - 2)
             event = {'x': x, 'y': y}
             message = gc.description(event)
-            action, path = self.view.settings().get('gidopen_context')
+            action, path = view.settings().get('gidopen_context')
             self.assertTrue(gc.is_visible(event))
             self.assertEqual(
                 message,
-                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, filename),
-                (filename[:pos], filename[pos:])
+                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
-            self.assertEqual(path, filename)
+            self.assertEqual(path, self.home_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_unbraced_env_existing(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+            home_base = os.path.basename(self.home_present)
+
+            view.run_command(
+                'append', {'characters': '$HOME/' + home_base, 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 2)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.home_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_braced_env_existing(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+            home_base = os.path.basename(self.home_present)
+
+            view.run_command(
+                'append', {'characters': '${HOME}/' + home_base, 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 2)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.home_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_absolute_path_with_row(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            view.run_command(
+                'append', {'characters': self.file_present + ':12', 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 5)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}:12'.format(
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                )
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
+            self.assertEqual(path, self.file_present + ':12:0')
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_relative_path_with_row(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            view.run_command(
+                'append', {'characters': 'present:12', 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 5)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}:12'.format(
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                )
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
+            self.assertEqual(path, self.file_present + ':12:0')
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_absolute_path_with_row_column(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            view.run_command(
+                'append', {
+                    'characters': self.file_present + ':12:34', 'force': True
+                }
+            )
+            x, y = view.text_to_window(view.size() - 8)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}:12:34'.format(
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                )
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
+            self.assertEqual(path, self.file_present + ':12:34')
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_relative_path_with_row_column(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            view.run_command(
+                'append', {'characters': 'present:12:34', 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 8)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}:12:34'.format(
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                )
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
+            self.assertEqual(path, self.file_present + ':12:34')
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_file_from_set_environment_variable(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            view.run_command(
+                'append', {
+                    'characters': 'ENVNAME={}\n'.format(self.file_present),
+                    'force': True
+                }
+            )
+            x, y = view.text_to_window(view.size() - 4)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.file_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_file_at_end_of_sentence(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set('gidopen_pwd', self.tmpdir)
+            gc = gidopen.gidopen_context(view)
+
+            # Extra dot does not confuse matcher
+            sentence = 'Open the file {}.'.format(self.file_present)
+            view.run_command(
+                'append', {'characters': sentence, 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 2)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_context')
+            self.assertTrue(gc.is_visible(event))
+            self.assertEqual(
+                message,
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.file_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
 
 
 class TestGidOpenRegion(TestCase):

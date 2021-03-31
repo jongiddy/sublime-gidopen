@@ -363,7 +363,9 @@ class gidopen_context(sublime_plugin.TextCommand):
         found = False
         if os.path.isabs(path):
             print('GidOpen: - absolute')
-            found = yield from self.all_files_prefixed_by(path, region)
+            found = yield from self.all_files_prefixed_by(
+                os.path.normpath(path), region
+            )
         elif path[0] == '~':
             # Looks like a tilde expanded absolute path.
             print('GidOpen: - absolute')
@@ -372,7 +374,9 @@ class gidopen_context(sublime_plugin.TextCommand):
                 # If path starts with '~alice' but user `alice` does not exist,
                 # then `expanduser` keeps the path as '~alice', in which case
                 # don't treat it as an absolute path.
-                found = yield from self.all_files_prefixed_by(expanded, region)
+                found = yield from self.all_files_prefixed_by(
+                    os.path.normpath(expanded), region
+                )
         return found
 
     def _handle_click_region(self, region):
