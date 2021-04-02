@@ -42,6 +42,79 @@ class TestExpandPath(TestCase):
                 gidopen.expand_path(self.view, pos, pos), expected
             )
 
+class TestPWD(TestCase):
+
+    def test_setting_absolute_ok(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set(gidopen.SETTING_PWD, '/tmp')
+            gc = gidopen.gidopen_context(view)
+            pwd, _folders, _labels = gc._setup_folders()
+            self.assertEqual(pwd, '/tmp')
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    def test_setting_tilde_ok(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as tmpdir:
+            view = sublime.active_window().new_file()
+            try:
+                settings = view.settings()
+                settings.set(gidopen.SETTING_PWD, '~/{}'.format(os.path.basename(tmpdir)))
+                gc = gidopen.gidopen_context(view)
+                pwd, _folders, _labels = gc._setup_folders()
+                self.assertEqual(pwd, tmpdir)
+            finally:
+                view.set_scratch(True)
+                view.window().focus_view(view)
+                view.window().run_command("close_file")
+
+    def test_setting_file_fails(self):
+        with tempfile.NamedTemporaryFile() as tmpfile:
+            view = sublime.active_window().new_file()
+            try:
+                settings = view.settings()
+                settings.set(gidopen.SETTING_PWD, tmpfile.name)
+                gc = gidopen.gidopen_context(view)
+                pwd, folders, _labels = gc._setup_folders()
+                # setting fails, so fallback to folders[0]
+                self.assertEqual(pwd, folders[0])
+            finally:
+                view.set_scratch(True)
+                view.window().focus_view(view)
+                view.window().run_command("close_file")
+
+    def test_setting_relative_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            view = sublime.active_window().new_file()
+            try:
+                settings = view.settings()
+                settings.set(gidopen.SETTING_PWD, os.path.basename(tmpdir))
+                gc = gidopen.gidopen_context(view)
+                pwd, folders, _labels = gc._setup_folders()
+                # setting fails, so fallback to folders[0]
+                self.assertEqual(pwd, folders[0])
+            finally:
+                view.set_scratch(True)
+                view.window().focus_view(view)
+                view.window().run_command("close_file")
+
+    def test_setting_notexist_fails(self):
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set(gidopen.SETTING_PWD, '/nonexisting/folder')
+            gc = gidopen.gidopen_context(view)
+            pwd, folders, _labels = gc._setup_folders()
+            # setting fails, so fallback to folders[0]
+            self.assertEqual(pwd, folders[0])
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
 class TestGidOpenPoint(TestCase):
 
     def setUp(self):
@@ -56,7 +129,7 @@ class TestGidOpenPoint(TestCase):
         self.tilde_file = os.path.join(self.tmpdir, '~4.txt')
         with open(self.tilde_file, 'w'):
             pass
-        self.atypical_file = os.path.join(self.tmpdir, 'file [x86].txt')
+        self.atypical_file = os.path.join(self.tmpdir, 'file & ice.txt')
         with open(self.atypical_file, 'w'):
             pass
 
@@ -97,7 +170,7 @@ class TestGidOpenPoint(TestCase):
             view = sublime.active_window().new_file()
             try:
                 settings = view.settings()
-                settings.set('gidopen_pwd', self.tmpdir)
+                settings.set(gidopen.SETTING_PWD, self.tmpdir)
                 gc = gidopen.gidopen_context(view)
 
                 view.run_command('append', {'characters': text, 'force': True})
@@ -139,7 +212,8 @@ class TestGidOpenPoint(TestCase):
             # the longer match wins (`also present` beats `present`)
             (self.also_present, self.also_present),
             (os.path.basename(self.also_present), self.also_present),
-            # Files with two atypical characters in sequence can be matched.
+            # Files with up to three atypical characters in sequence surrounded
+            # by typical characters can be matched.
             (self.atypical_file, self.atypical_file),
             (os.path.basename(self.atypical_file), self.atypical_file),
         )
@@ -149,7 +223,7 @@ class TestGidOpenPoint(TestCase):
             view = sublime.active_window().new_file()
             try:
                 settings = view.settings()
-                settings.set('gidopen_pwd', self.tmpdir)
+                settings.set(gidopen.SETTING_PWD, self.tmpdir)
                 gc = gidopen.gidopen_context(view)
 
                 view.run_command('append', {'characters': text, 'force': True})
@@ -171,7 +245,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
             home_base = os.path.basename(self.home_present)
 
@@ -198,7 +272,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
             home_base = os.path.basename(self.home_present)
 
@@ -225,7 +299,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
             home_base = os.path.basename(self.home_present)
 
@@ -252,7 +326,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             view.run_command(
@@ -280,7 +354,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             view.run_command(
@@ -308,7 +382,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             view.run_command(
@@ -338,7 +412,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             view.run_command(
@@ -366,7 +440,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             view.run_command(
@@ -395,7 +469,7 @@ class TestGidOpenPoint(TestCase):
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set('gidopen_pwd', self.tmpdir)
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
             gc = gidopen.gidopen_context(view)
 
             # Extra dot does not confuse matcher
@@ -445,7 +519,7 @@ class TestGidOpenRegion(TestCase):
 
         self.view = sublime.active_window().new_file()
         settings = self.view.settings()
-        settings.set('gidopen_pwd', self.tmpdir)
+        settings.set(gidopen.SETTING_PWD, self.tmpdir)
         # make sure we have a window to work with
         s = sublime.load_settings("Preferences.sublime-settings")
         s.set("close_windows_when_empty", False)

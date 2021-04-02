@@ -1,9 +1,18 @@
 import collections
 import os
-import re
 
 import sublime  # type: ignore
 import sublime_plugin  # type: ignore
+
+SETTING_PWD = 'current_working_directory'
+
+CONTEXT_ACTION_FOLDER_ADD = 'Add Folder'
+CONTEXT_ACTION_FOLDER_REVEAL = 'Reveal'
+CONTEXT_ACTION_FOLDER_FIND = 'Find'
+CONTEXT_ACTION_FILE_OPEN = 'Open'
+CONTEXT_ACTION_FILE_GOTO = 'Goto'
+CONTEXT_ACTION_FILE_NEW = 'New File'
+CONTEXT_ACTION_FOLDER_NEW = 'Create Folder'
 
 
 def is_likely_path_char(c):
@@ -176,15 +185,6 @@ def get_line_col(view, pos):
     return None
 
 
-CONTEXT_ACTION_FOLDER_ADD = 'Add Folder'
-CONTEXT_ACTION_FOLDER_REVEAL = 'Reveal'
-CONTEXT_ACTION_FOLDER_FIND = 'Find'
-CONTEXT_ACTION_FILE_OPEN = 'Open'
-CONTEXT_ACTION_FILE_GOTO = 'Goto'
-CONTEXT_ACTION_FILE_NEW = 'New File'
-CONTEXT_ACTION_FOLDER_NEW = 'Create Folder'
-
-
 def is_in(descendent, ancestor):
     # type: (str, str) -> bool
     assert descendent != ancestor
@@ -241,7 +241,13 @@ class gidopen_context(sublime_plugin.TextCommand):
                 basename = os.path.basename(folder)
                 if count[basename] == 1:
                     labels[folder] = basename
-            pwd = self.view.settings().get('gidopen_pwd')
+            pwd = self.view.settings().get(SETTING_PWD)
+            if pwd is not None:
+                pwd = os.path.expanduser(pwd)
+                if os.path.isabs(pwd) and os.path.isdir(pwd):
+                    pwd = os.path.normpath(pwd)
+                else:
+                    pwd = None
             if pwd is None:
                 file = winvar.get('file')
                 if file is not None:
@@ -250,8 +256,6 @@ class gidopen_context(sublime_plugin.TextCommand):
                     pwd = folders[0]
                 else:
                     pwd = self._get_home()
-            else:
-                pwd = os.path.expanduser(pwd)
             self._pwd = pwd
             self._folders = folders
             self._labels = labels
