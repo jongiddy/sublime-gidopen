@@ -194,7 +194,7 @@ def is_in(descendent, ancestor):
     )
 
 
-class gidopen_context(sublime_plugin.TextCommand):
+class gidopen_in_view(sublime_plugin.TextCommand):
 
     def __init__(self, view):
         # type: (sublime.View) -> None
@@ -733,7 +733,7 @@ class gidopen_context(sublime_plugin.TextCommand):
                             path = None
                             label = None
 
-            self.view.settings().set('gidopen_context', (action, path))
+            self.view.settings().set('gidopen_in_view', (action, path))
             return '{} {}'.format(action, label)
         except Exception:
             import traceback
@@ -741,11 +741,11 @@ class gidopen_context(sublime_plugin.TextCommand):
             raise
 
     def is_visible(self, event):
-        context = self.view.settings().get('gidopen_context')
+        context = self.view.settings().get('gidopen_in_view')
         return context is not None and context[0] is not None
 
     def run(self, edit, event):
-        context = self.view.settings().get('gidopen_context')
+        context = self.view.settings().get('gidopen_in_view')
         if context is None:
             return
         action, path = context
@@ -782,4 +782,110 @@ class gidopen_context(sublime_plugin.TextCommand):
                 options = 0
             view = window.open_file(path, options)
             window.focus_view(view)
-        self.view.settings().set('gidopen_context', None)
+        self.view.settings().set('gidopen_in_view', None)
+
+
+class gidopen_in_window(sublime_plugin.WindowCommand):
+
+    def __init__(self, window):
+        # type: (sublime.Window) -> None
+        super().__init__(window)
+        self.path = ''
+        self._home = None  # type: str|None
+        self._pwd = None  # type: str|None
+        self._folders = None  # type: list[str]|None
+        self._labels = None  # type: dict[str, str]|None
+
+    def _get_home(self):
+        # type: () -> str
+        if self._home is None:
+            self._home = os.environ.get('HOME', '/')
+        assert self._home is not None
+        return self._home
+
+    def _setup_folders(self):
+        # type: () -> tuple[str, list[str], dict[str, str]]
+        if self._pwd is None:
+            window = self.window
+            winvar = window.extract_variables()
+            window_folders = window.folders()
+            folders = []  # type: list[str]
+            labels = {}  # type: dict[str, str]
+            count = collections.defaultdict(int)  # type: dict[str, int]
+            for after, folder in enumerate(window_folders, start=1):
+                basename = os.path.basename(folder)
+                count[basename] += 1
+                if any(folder == f or is_in(folder, f) for f in folders):
+                    # If a parent of this folder has appeared, do not keep
+                    pass
+                elif any(is_in(folder, f) for f in window_folders[after:]):
+                    # If a parent of this folder is yet to come, do not keep
+                    pass
+                else:
+                    folders.append(folder)
+            for folder in folders:
+                basename = os.path.basename(folder)
+                if count[basename] == 1:
+                    labels[folder] = basename
+            file = winvar.get('file')
+            if file is not None:
+                pwd = os.path.dirname(file)
+            elif folders:
+                pwd = folders[0]
+            else:
+                pwd = self._get_home()
+            self._pwd = pwd
+            self._folders = folders
+            self._labels = labels
+
+        assert self._pwd is not None
+        assert self._folders is not None
+        assert self._labels is not None
+
+        return self._pwd, self._folders, self._labels
+
+    def _shorten_name(self, name):
+        # type: (str) -> str
+        pwd, folders, labels = self._setup_folders()
+
+        for folder in folders:
+            if name == folder or is_in(name, folder):
+                label = labels.get(folder)
+                if label is not None:
+                    return '{}{}'.format(label, name[len(folder):])
+
+        home = self._get_home()
+        if home != '/' and name != home and is_in(name, home):
+            return '~' + name[len(home):]
+
+        return name
+
+    def description(self):
+        # type: () -> str
+        try:
+            self.window.run_command('copy')
+            buf = sublime.get_clipboard()
+            if buf and os.path.isfile(buf):
+                self.path = buf
+                return '{} {}'.format(CONTEXT_ACTION_FILE_OPEN, self._shorten_name(buf))
+            else:
+                self.path = ''
+                return 'GidOpen requires path to be selected here'
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            raise
+
+    def is_visible(self):
+        # type: () -> bool
+        return True
+
+    def is_enabled(self):
+        # type: () -> bool
+        return bool(self.path)
+
+    def run(self):
+        # type: () -> None
+        view = self.window.open_file(self.path, 0)
+        self.window.focus_view(view)
+        self.path = ''
