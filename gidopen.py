@@ -67,7 +67,71 @@ class TextFound(Candidate):
     pass
 
 
-def select_longest(candidates):
+def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
+    # (str, Callable[[], Iterator[str]], sublime.Region) -> Iterator[Candidate]
+    path = os.path.expanduser(text)
+    expanded = os.path.expanduser(
+        os.path.expandvars(text)
+    )
+    if path != expanded:
+        if os.path.isabs(path):
+            if os.path.isfile(path):
+                yield FileFound(region, path)
+            elif os.path.isdir(path):
+                yield FolderFound(region, path)
+            elif os.path.isdir(os.path.dirname(path)):
+                yield FileNotFound(region, path)
+            else:
+                path = os.path.dirname(path)
+                parent = os.path.dirname(path)
+                while parent != path and not os.path.isdir(parent):
+                    path = parent
+                    parent = os.path.dirname(path)
+                yield FolderNotFound(region, path)
+        else:
+            for folder in folder_iterate():
+                abspath = os.path.normpath(os.path.join(folder, path))
+                if os.path.isfile(abspath):
+                    yield FileFound(region, abspath)
+                elif os.path.isdir(path):
+                    yield FolderFound(region, path)
+
+    if os.path.isabs(expanded):
+        if os.path.isfile(expanded):
+            yield FileFound(region, expanded)
+        elif os.path.isdir(expanded):
+            yield FolderFound(region, expanded)
+        elif os.path.isdir(os.path.dirname(expanded)):
+            yield FileNotFound(region, expanded)
+        else:
+            path = os.path.dirname(expanded)
+            parent = os.path.dirname(path)
+            while parent != path and not os.path.isdir(parent):
+                path = parent
+                parent = os.path.dirname(path)
+            yield FolderNotFound(region, path)
+    else:
+        for folder in folder_iterate():
+            abspath = os.path.normpath(os.path.join(folder, expanded))
+            if os.path.isfile(abspath):
+                yield FileFound(region, abspath)
+            elif os.path.isdir(abspath):
+                yield FolderFound(region, abspath)
+
+
+def select_longest_path(candidates):
+    # type: (...) -> Candidate|None
+    result = None
+    maxlen = -1
+    for candidate in candidates:
+        length = len(candidate.path)
+        if length > maxlen:
+            result = candidate
+            maxlen = length
+    return result
+
+
+def select_longest_region(candidates):
     # type: (...) -> Candidate|None
     result = None
     maxlen = -1
@@ -389,54 +453,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         # in the region. This allows override of the heuristic.
         selected_text = self.view.substr(region)
         yield TextFound(region, selected_text)
-        path = os.path.expanduser(selected_text)
-        expanded = os.path.expanduser(
-            os.path.expandvars(selected_text)
-        )
-        if path != expanded:
-            if os.path.isabs(path):
-                if os.path.isfile(path):
-                    yield FileFound(region, path)
-                elif os.path.isdir(path):
-                    yield FolderFound(region, path)
-                elif os.path.isdir(os.path.dirname(path)):
-                    yield FileNotFound(region, path)
-                else:
-                    path = os.path.dirname(path)
-                    parent = os.path.dirname(path)
-                    while parent != path and not os.path.isdir(parent):
-                        path = parent
-                        parent = os.path.dirname(path)
-                    yield FolderNotFound(region, path)
-            else:
-                for folder in self._folder_iterate():
-                    abspath = os.path.normpath(os.path.join(folder, path))
-                    if os.path.isfile(abspath):
-                        yield FileFound(region, abspath)
-                    elif os.path.isdir(path):
-                        yield FolderFound(region, path)
-
-        if os.path.isabs(expanded):
-            if os.path.isfile(expanded):
-                yield FileFound(region, expanded)
-            elif os.path.isdir(expanded):
-                yield FolderFound(region, expanded)
-            elif os.path.isdir(os.path.dirname(expanded)):
-                yield FileNotFound(region, expanded)
-            else:
-                path = os.path.dirname(expanded)
-                parent = os.path.dirname(path)
-                while parent != path and not os.path.isdir(parent):
-                    path = parent
-                    parent = os.path.dirname(path)
-                yield FolderNotFound(region, path)
-        else:
-            for folder in self._folder_iterate():
-                abspath = os.path.normpath(os.path.join(folder, expanded))
-                if os.path.isfile(abspath):
-                    yield FileFound(region, abspath)
-                elif os.path.isdir(abspath):
-                    yield FolderFound(region, abspath)
+        yield from candidates_from_string(selected_text, self._folder_iterate, region)
 
     def _handle_click_point(self, click_point):
         # (int) -> Iterator[Candidate]
@@ -626,7 +643,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                         i += 1
 
     def _best(self, options):
-        return select_longest(options)
+        return select_longest_region(options)
 
     def _folder_in_project(self, name):
         # type: (str) -> bool
@@ -658,12 +675,6 @@ class gidopen_in_view(sublime_plugin.TextCommand):
     def description(self, event):
         try:
             self._pwd = None
-            action = CONTEXT_ACTION_FILE_NEW
-            files = []
-            folders = []
-            notfiles = []
-            notfolders = []
-            texts = []
 
             click_point = self.view.window_to_text((event['x'], event['y']))
 
@@ -676,6 +687,12 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                     break
             else:
                 candidates = self._handle_click_point(click_point)
+
+            files = []
+            folders = []
+            notfiles = []
+            notfolders = []
+            texts = []
 
             for candidate in candidates:
                 print('GidOpen:', candidate)
@@ -790,6 +807,7 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
     def __init__(self, window):
         # type: (sublime.Window) -> None
         super().__init__(window)
+        self.action = None  # type: str|None
         self.path = ''
         self._home = None  # type: str|None
         self._pwd = None  # type: str|None
@@ -844,6 +862,37 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
 
         return self._pwd, self._folders, self._labels
 
+    def _folder_iterate(self, yield_pwd_in_folder=True):
+        # If yield_pwd_in_folder is:
+        # True, yield the pwd even if it is subfolder of a project folder
+        # False, do not yield the pwd if it is a subfolder of a project folder
+        pwd, folders, labels = self._setup_folders()
+        pwd_is_folder = False
+        pwd_in_folder = False
+        for folder in folders:
+            yield folder
+            if pwd == folder:
+                pwd_is_folder = True
+            elif is_in(pwd, folder):
+                pwd_in_folder = True
+        if pwd_in_folder:
+            if yield_pwd_in_folder:
+                yield pwd
+        else:
+            if not pwd_is_folder:
+                yield pwd
+
+    def _best(self, options):
+        return select_longest_path(options)
+
+    def _folder_in_project(self, name):
+        # type: (str) -> bool
+        pwd, folders, labels = self._setup_folders()
+        for folder in folders:
+            if name == folder or is_in(name, folder):
+                return True
+        return False
+
     def _shorten_name(self, name):
         # type: (str) -> str
         pwd, folders, labels = self._setup_folders()
@@ -864,13 +913,69 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         # type: () -> str
         try:
             self.window.run_command('copy')
-            buf = sublime.get_clipboard()
-            if buf and os.path.isfile(buf):
-                self.path = buf
-                return '{} {}'.format(CONTEXT_ACTION_FILE_OPEN, self._shorten_name(buf))
+            text = sublime.get_clipboard()
+            candidates = candidates_from_string(text, self._folder_iterate)
+
+            files = []
+            folders = []
+            notfiles = []
+            notfolders = []
+            texts = []
+
+            for candidate in candidates:
+                print('GidOpen:', candidate)
+                if isinstance(candidate, FileFound):
+                    files.append(candidate)
+                elif isinstance(candidate, FolderFound):
+                    folders.append(candidate)
+                elif isinstance(candidate, FileNotFound):
+                    notfiles.append(candidate)
+                elif isinstance(candidate, FolderNotFound):
+                    notfolders.append(candidate)
+                else:
+                    assert isinstance(candidate, TextFound)
+                    texts.append(candidate)
+
+            action = None
+
+            candidate = self._best(files)
+            if candidate is not None:
+                path = candidate.path
+                label = self._shorten_name(path)
+                action = CONTEXT_ACTION_FILE_OPEN
             else:
+                candidate = self._best(folders)
+                if candidate is not None:
+                    path = candidate.path
+                    if self._folder_in_project(path):
+                        action = CONTEXT_ACTION_FOLDER_REVEAL
+                        label = self._shorten_name(path)
+                    else:
+                        action = CONTEXT_ACTION_FOLDER_ADD
+                        label = self._shorten_name(path)
+                else:
+                    candidate = self._best(notfiles)
+                    if candidate is not None:
+                        action = CONTEXT_ACTION_FILE_NEW
+                        path = candidate.path
+                        label = self._shorten_name(path)
+                    else:
+                        candidate = self._best(notfolders)
+                        if candidate is not None:
+                            action = CONTEXT_ACTION_FOLDER_NEW
+                            path = candidate.path
+                            label = self._shorten_name(path)
+                        else:
+                            path = label = ''
+
+            if action is None:
+                self.action = None
                 self.path = ''
                 return 'GidOpen requires path to be selected here'
+            else:
+                self.action = action
+                self.path = path
+                return '{} {}'.format(action, label)
         except Exception:
             import traceback
             traceback.print_exc()
@@ -886,6 +991,42 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
 
     def run(self):
         # type: () -> None
-        view = self.window.open_file(self.path, 0)
-        self.window.focus_view(view)
+        action = self.action
+        path = self.path
+        if action is None:
+            return
+        window = self.window
+        if action == CONTEXT_ACTION_FOLDER_ADD:
+            add_folder_to_project(window, path)
+        elif action == CONTEXT_ACTION_FOLDER_REVEAL:
+            # ST does not support revealing a folder, so we find a file that
+            # should be close to the top of the folder's file list.
+            for dirpath, dirnames, filenames in os.walk(path):
+                if filenames:
+                    # Sort filenames so we find one near the top of the folder
+                    names = sorted(filenames, key=str.casefold)
+                    filepath = os.path.join(dirpath, names[0])
+                    print('GidOpen: reveal', self._shorten_name(filepath))
+                    view = window.find_open_file(filepath)
+                    if view is None:
+                        view = window.open_file(filepath, 0)
+                    else:
+                        window.focus_view(view)
+                    view.window().run_command('reveal_in_side_bar')
+                    break
+                # If the folder does not contain any files, go into the
+                # subfolders in sorted order.
+                dirnames.sort(key=str.casefold)
+        elif action == CONTEXT_ACTION_FOLDER_NEW:
+            os.mkdir(path)
+            if not self._folder_in_project(path):
+                add_folder_to_project(window, path)
+        else:
+            if action == CONTEXT_ACTION_FILE_GOTO:
+                options = sublime.ENCODED_POSITION
+            else:
+                options = 0
+            view = window.open_file(path, options)
+            window.focus_view(view)
+        self.action = None
         self.path = ''

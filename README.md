@@ -32,12 +32,12 @@ If the clicked path is a directory in the project folders, the menu
 will reveal the folder.
 If outside the project folders, it will add the folder to the project.
 
-If the filename is not correctly selected, select the correct filename
-and right-click on the selected text.  In this case, as well as
-opening an existing file, the menu will create the file if it does not
-exist.
+If GidOpen does not find the correct filename, select the correct
+filename and right-click on the selected text.  In this case, as well
+as opening an existing file, the menu will allow creation of the file
+if it does not exist.
 
 In text inputs and the console, the context menu only works if the
-filename is selected.  If there is no selection or the selected text
-is not a file, the message "GidOpen requires path to be selected here"
-will be shown.
+path is selected.  In these windows, if there is no selection or the
+selected text is not a path, the message "GidOpen requires path to
+be selected here" will be shown.
