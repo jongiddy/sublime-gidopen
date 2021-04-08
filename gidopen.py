@@ -160,6 +160,28 @@ def add_folder_to_project(window, path):
     window.set_project_data(project)
 
 
+def reveal_folder(window, path):
+    # type: (sublime.Window, str) -> None
+    # ST does not support revealing a folder, so find a file that
+    # should be close to the top of the folder's file list.
+    for dirpath, dirnames, filenames in os.walk(path):
+        if filenames:
+            # Sort filenames so we find one near the top of the folder
+            names = sorted(filenames, key=str.casefold)
+            filepath = os.path.join(dirpath, names[0])
+            print('GidOpen: reveal', filepath)
+            view = window.find_open_file(filepath)
+            if view is None:
+                window.open_file(filepath, 0)
+            else:
+                window.focus_view(view)
+            window.run_command('reveal_in_side_bar')
+            break
+        # If the folder does not contain any files, go into the
+        # subfolders in sorted order.
+        dirnames.sort(key=str.casefold)
+
+
 def expand_path(view, begin, end):
     # type: (sublime.View, int, int) -> tuple[int, int]
     while begin > 0 and is_likely_path_char(view.substr(begin - 1)):
@@ -770,24 +792,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         if action == CONTEXT_ACTION_FOLDER_ADD:
             add_folder_to_project(window, path)
         elif action == CONTEXT_ACTION_FOLDER_REVEAL:
-            # ST does not support revealing a folder, so we find a file that
-            # should be close to the top of the folder's file list.
-            for dirpath, dirnames, filenames in os.walk(path):
-                if filenames:
-                    # Sort filenames so we find one near the top of the folder
-                    names = sorted(filenames, key=str.casefold)
-                    filepath = os.path.join(dirpath, names[0])
-                    print('GidOpen: reveal', self._shorten_name(filepath))
-                    view = window.find_open_file(filepath)
-                    if view is None:
-                        view = window.open_file(filepath, 0)
-                    else:
-                        window.focus_view(view)
-                    view.window().run_command('reveal_in_side_bar')
-                    break
-                # If the folder does not contain any files, go into the
-                # subfolders in sorted order.
-                dirnames.sort(key=str.casefold)
+            reveal_folder(window, path)
         elif action == CONTEXT_ACTION_FOLDER_NEW:
             os.mkdir(path)
             if not self._folder_in_project(path):
@@ -999,24 +1004,7 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         if action == CONTEXT_ACTION_FOLDER_ADD:
             add_folder_to_project(window, path)
         elif action == CONTEXT_ACTION_FOLDER_REVEAL:
-            # ST does not support revealing a folder, so we find a file that
-            # should be close to the top of the folder's file list.
-            for dirpath, dirnames, filenames in os.walk(path):
-                if filenames:
-                    # Sort filenames so we find one near the top of the folder
-                    names = sorted(filenames, key=str.casefold)
-                    filepath = os.path.join(dirpath, names[0])
-                    print('GidOpen: reveal', self._shorten_name(filepath))
-                    view = window.find_open_file(filepath)
-                    if view is None:
-                        view = window.open_file(filepath, 0)
-                    else:
-                        window.focus_view(view)
-                    view.window().run_command('reveal_in_side_bar')
-                    break
-                # If the folder does not contain any files, go into the
-                # subfolders in sorted order.
-                dirnames.sort(key=str.casefold)
+            reveal_folder(window, path)
         elif action == CONTEXT_ACTION_FOLDER_NEW:
             os.mkdir(path)
             if not self._folder_in_project(path):
