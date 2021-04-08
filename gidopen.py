@@ -1,11 +1,13 @@
 import collections
 import os
+import traceback
 
 import sublime  # type: ignore
 import sublime_plugin  # type: ignore
 
 SETTING_PWD = 'current_working_directory'
 
+CONTEXT_ACTION_ERROR = 'Error'
 CONTEXT_ACTION_FOLDER_ADD = 'Add Folder'
 CONTEXT_ACTION_FOLDER_REVEAL = 'Reveal'
 CONTEXT_ACTION_FOLDER_FIND = 'Find'
@@ -34,6 +36,18 @@ def find_all(pat, s):
     while i != -1:
         yield i
         i = s.find(pat, i + 1)
+
+
+access = os.access
+is_file = os.path.isfile
+
+if access in os.supports_effective_ids:
+    def is_readable(path):
+        return access(path, os.R_OK, effective_ids=True)
+else:
+    def is_readable(path):
+        return access(path, os.R_OK)
+
 
 class Candidate:
 
@@ -75,8 +89,11 @@ def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
     )
     if path != expanded:
         if os.path.isabs(path):
-            if os.path.isfile(path):
-                yield FileFound(region, path)
+            if is_file(path):
+                if is_readable(path):
+                    yield FileFound(region, path)
+                else:
+                    print('GidOpen: - skip {}: not readable'.format(path))
             elif os.path.isdir(path):
                 yield FolderFound(region, path)
             elif os.path.isdir(os.path.dirname(path)):
@@ -91,14 +108,20 @@ def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
         else:
             for folder in folder_iterate():
                 abspath = os.path.normpath(os.path.join(folder, path))
-                if os.path.isfile(abspath):
-                    yield FileFound(region, abspath)
+                if is_file(abspath):
+                    if is_readable(abspath):
+                        yield FileFound(region, abspath)
+                    else:
+                        print('GidOpen: - skip {}: not readable'.format(abspath))
                 elif os.path.isdir(path):
                     yield FolderFound(region, path)
 
     if os.path.isabs(expanded):
-        if os.path.isfile(expanded):
-            yield FileFound(region, expanded)
+        if is_file(expanded):
+            if is_readable(expanded):
+                yield FileFound(region, expanded)
+            else:
+                print('GidOpen: - skip {}: not readable'.format(expanded))
         elif os.path.isdir(expanded):
             yield FolderFound(region, expanded)
         elif os.path.isdir(os.path.dirname(expanded)):
@@ -113,8 +136,11 @@ def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
     else:
         for folder in folder_iterate():
             abspath = os.path.normpath(os.path.join(folder, expanded))
-            if os.path.isfile(abspath):
-                yield FileFound(region, abspath)
+            if is_file(abspath):
+                if is_readable(abspath):
+                    yield FileFound(region, abspath)
+                else:
+                    print('GidOpen: - skip {}: not readable'.format(abspath))
             elif os.path.isdir(abspath):
                 yield FolderFound(region, abspath)
 
@@ -413,7 +439,10 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                 path = os.path.join(dirpath, filename)
                 region = self._expand_right(folder_region, path[dlen:])
                 if region:
-                    yield FileFound(region, path)
+                    if is_readable(path):
+                        yield FileFound(region, path)
+                    else:
+                        print('GidOpen: - skip {}: not readable'.format(self._shorten_name(path)))
 
     def all_files_prefixed_by(self, prefix, prefix_region):
         # (str, sublime.Region) -> Generator[Candidate, None, bool]
@@ -432,10 +461,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                     if region:
                         if os.path.isdir(path):
                             if name in self._folder_excludes:
-                                print(
-                                    'GidOpen: - skip',
-                                    self._shorten_name(path),
-                                )
+                                print('GidOpen: - skip {}: excluded folder'.format(self._shorten_name(path)))
                             else:
                                 found = True
                                 yield FolderFound(region, path)
@@ -444,8 +470,11 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                                         path, region
                                     )
                         else:
-                            found = True
-                            yield FileFound(region, path)
+                            if is_readable(path):
+                                found = True
+                                yield FileFound(region, path)
+                            else:
+                                print('GidOpen: - skip {}: not readable'.format(self._shorten_name(path)))
         return found
 
     def check_absolute_path(self, region, path):
@@ -608,8 +637,11 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                                 yield from self.all_matching_descendants(
                                     fullpath, text_region
                                 )
-                        elif os.path.isfile(fullpath):
-                            yield FileFound(text_region, fullpath)
+                        elif is_file(fullpath):
+                            if is_readable(fullpath):
+                                yield FileFound(text_region, fullpath)
+                            else:
+                                print('GidOpen: - skip {}: not readable'.format(self._shorten_name(fullpath)))
 
     def _search_prefix(self, region, basename):
         # (sublime.Region, str) -> Iterator[Candidate]
@@ -626,14 +658,14 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                         if cregion:
                             if os.path.isdir(path):
                                 if name in self._folder_excludes:
-                                    print(
-                                        'GidOpen: - skip',
-                                        self._shorten_name(path),
-                                    )
+                                    print('GidOpen: - skip {}: excluded folder'.format(self._shorten_name(path)))
                                 else:
                                     yield FolderFound(cregion, path)
                             else:
-                                yield FileFound(cregion, path)
+                                if is_readable(path):
+                                    yield FileFound(cregion, path)
+                                else:
+                                    print('GidOpen: - skip {}: not readable'.format(self._shorten_name(path)))
 
         # Second, search under folders
         home = self._get_home()
@@ -774,14 +806,18 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
             self.view.settings().set('gidopen_in_view', (action, path))
             return '{} {}'.format(action, label)
-        except Exception:
-            import traceback
+        except Exception as e:
             traceback.print_exc()
-            raise
+            self.view.settings().set('gidopen_in_view', (CONTEXT_ACTION_ERROR, None))
+            return 'GidOpen: {}'.format(e.__class__.__name__)
 
     def is_visible(self, event):
         context = self.view.settings().get('gidopen_in_view')
         return context is not None and context[0] is not None
+
+    def is_enabled(self, event):
+        context = self.view.settings().get('gidopen_in_view')
+        return context is not None and context[1] is not None
 
     def run(self, edit, event):
         context = self.view.settings().get('gidopen_in_view')
@@ -981,10 +1017,11 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
                 self.action = action
                 self.path = path
                 return '{} {}'.format(action, label)
-        except Exception:
-            import traceback
+        except Exception as e:
             traceback.print_exc()
-            raise
+            self.action = None
+            self.path = ''
+            return 'GidOpen: {}'.format(e.__class__.__name__)
 
     def is_visible(self):
         # type: () -> bool

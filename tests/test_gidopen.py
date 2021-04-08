@@ -870,3 +870,55 @@ class TestGidOpenRegion(TestCase):
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
         self.assertEqual(path, self.file_present + ':12:34')
+
+
+class TestPermissions(TestCase):
+
+    def setUp(self):
+        self.view = sublime.active_window().new_file()
+        # make sure we have a window to work with
+        s = sublime.load_settings("Preferences.sublime-settings")
+        s.set("close_windows_when_empty", False)
+
+    def tearDown(self):
+        if self.view:
+            self.view.set_scratch(True)
+            self.view.window().focus_view(self.view)
+            self.view.window().run_command("close_file")
+
+    def test_file_not_readable_point(self):
+        with tempfile.NamedTemporaryFile() as f:
+            os.chmod(f.name, 0o000)
+            assert not gidopen.is_readable_file(f.name)
+            gc = gidopen.gidopen_in_view(self.view)
+
+            self.view.run_command(
+                'append', {'characters': f.name, 'force': True}
+            )
+
+            x, y = self.view.text_to_window(self.view.size() - 8)
+            event = {'x': x, 'y': y}
+            gc.description(event)
+            action, path = self.view.settings().get('gidopen_in_view')
+            self.assertFalse(gc.is_visible(event), (action, path))
+            self.assertEqual(action, None)
+            self.assertEqual(path, None)
+
+    def test_file_not_readable_region(self):
+        with tempfile.NamedTemporaryFile() as f:
+            os.chmod(f.name, 0o000)
+            assert not gidopen.is_readable_file(f.name)
+            gc = gidopen.gidopen_in_view(self.view)
+
+            self.view.run_command(
+                'append', {'characters': f.name, 'force': True}
+            )
+            self.view.sel().add(sublime.Region(0, len(f.name)))
+
+            x, y = self.view.text_to_window(self.view.size() - 8)
+            event = {'x': x, 'y': y}
+            gc.description(event)
+            action, path = self.view.settings().get('gidopen_in_view')
+            self.assertFalse(gc.is_visible(event), (action, path))
+            self.assertEqual(action, None)
+            self.assertEqual(path, None)
