@@ -12,6 +12,8 @@ cd ~/.config/sublime-text-3/Packages
 git clone git@github.com:jongiddy/sublime-gidopen.git
 ```
 
+To find the `Packages` path use the Sublime Text menu `Preferences / Browse Packages...`
+
 ## Update
 
 Update by pulling the latest version.

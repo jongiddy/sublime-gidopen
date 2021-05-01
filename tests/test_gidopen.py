@@ -1,14 +1,46 @@
 import os
+import platform
 import shutil
 import sys
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, skipIf
 
-import sublime
+import sublime  # type: ignore
 
 version = sublime.version()
 
 gidopen = sys.modules["sublime-gidopen.gidopen"]
+
+
+def shorten_name(path):
+    # type: (str) -> str
+    if platform.system() != 'Windows':
+        home = gidopen.get_home()  # type: ignore
+        if home < gidopen.AbsolutePath(path):  # type: ignore
+            return '~' + path[len(home):]
+    return path
+
+class TestPartialPath(TestCase):
+
+    def test_empty_path(self):
+        p = gidopen.PartialPath('')
+        self.assertEqual(str(p), '')
+        self.assertEqual(len(p), 0)
+        self.assertEqual(p.canonical_len(), 0)
+
+    def test_relative_path(self):
+        s = 'dir/file'
+        p = gidopen.PartialPath(s)
+        self.assertEqual(str(p), s)
+        self.assertEqual(len(p), len(s))
+        self.assertEqual(p.canonical_len(), len(s))
+
+    def test_absolute_path(self):
+        s = '/dir/file'
+        p = gidopen.PartialPath(s)
+        self.assertEqual(str(p), s)
+        self.assertEqual(len(p), len(s))
+        self.assertEqual(p.canonical_len(), len(s))
 
 class TestExpandPath(TestCase):
 
@@ -45,27 +77,28 @@ class TestExpandPath(TestCase):
 class TestPWD(TestCase):
 
     def test_setting_absolute_ok(self):
+        tmpdir = tempfile.gettempdir()
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
-            settings.set(gidopen.SETTING_PWD, '/tmp')
+            settings.set(gidopen.SETTING_PWD, tmpdir)
             gc = gidopen.gidopen_in_view(view)
             pwd, _folders, _labels = gc._setup_folders()
-            self.assertEqual(pwd, '/tmp')
+            self.assertEqual(str(pwd), tmpdir)
         finally:
             view.set_scratch(True)
             view.window().focus_view(view)
             view.window().run_command("close_file")
 
     def test_setting_tilde_ok(self):
-        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as tmpdir:
+        with tempfile.TemporaryDirectory(dir=os.path.expanduser('~')) as tmpdir:
             view = sublime.active_window().new_file()
             try:
                 settings = view.settings()
-                settings.set(gidopen.SETTING_PWD, '~/{}'.format(os.path.basename(tmpdir)))
+                settings.set(gidopen.SETTING_PWD, os.path.join('~', os.path.basename(tmpdir)))
                 gc = gidopen.gidopen_in_view(view)
                 pwd, _folders, _labels = gc._setup_folders()
-                self.assertEqual(pwd, tmpdir)
+                self.assertEqual(str(pwd), tmpdir)
             finally:
                 view.set_scratch(True)
                 view.window().focus_view(view)
@@ -133,7 +166,7 @@ class TestGidOpenPoint(TestCase):
         with open(self.atypical_file, 'w'):
             pass
 
-        home = os.environ['HOME']
+        home = os.path.expanduser('~')
         tilde_file = None
         for basename in os.listdir(home):
             if len(basename) > 2:
@@ -227,13 +260,20 @@ class TestGidOpenPoint(TestCase):
                 gc = gidopen.gidopen_in_view(view)
 
                 view.run_command('append', {'characters': text, 'force': True})
-                for pos in range(view.size() + 1):
+                if text[1] == ':':
+                    # Windows path with drive
+                    start = 2
+                else:
+                    start = 0
+                for pos in range(start, view.size() + 1):
                     x, y = view.text_to_window(pos)
                     event = {'x': x, 'y': y}
                     message = gc.description(event)
                     action, path = view.settings().get('gidopen_in_view')
                     self.assertTrue(gc.is_visible(event), (text, pos))
-                    self.assertEqual(message, '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, filename), (text, pos))
+                    self.assertEqual(
+                        message, '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(filename)), (text, pos)
+                    )
                     self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN, (text, pos))
                     self.assertEqual(path, filename, (text, pos))
             finally:
@@ -256,10 +296,10 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), '~/' + home_base)
             self.assertEqual(
                 message,
-                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
             self.assertEqual(path, self.home_present)
@@ -269,6 +309,10 @@ class TestGidOpenPoint(TestCase):
             view.window().run_command("close_file")
 
     def test_unbraced_env_existing(self):
+        if platform.system() == 'Windows':
+            home = '$HOMEDRIVE$HOMEPATH'
+        else:
+            home = '$HOME'
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
@@ -277,16 +321,16 @@ class TestGidOpenPoint(TestCase):
             home_base = os.path.basename(self.home_present)
 
             view.run_command(
-                'append', {'characters': '$HOME/' + home_base, 'force': True}
+                'append', {'characters': home + '/' + home_base, 'force': True}
             )
             x, y = view.text_to_window(view.size() - 2)
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
-                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
             self.assertEqual(path, self.home_present)
@@ -296,6 +340,10 @@ class TestGidOpenPoint(TestCase):
             view.window().run_command("close_file")
 
     def test_braced_env_existing(self):
+        if platform.system() == 'Windows':
+            home = '${HOMEDRIVE}${HOMEPATH}'
+        else:
+            home = '${HOME}'
         view = sublime.active_window().new_file()
         try:
             settings = view.settings()
@@ -304,16 +352,45 @@ class TestGidOpenPoint(TestCase):
             home_base = os.path.basename(self.home_present)
 
             view.run_command(
-                'append', {'characters': '${HOME}/' + home_base, 'force': True}
+                'append', {'characters': home + '/' + home_base, 'force': True}
             )
             x, y = view.text_to_window(view.size() - 2)
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
-                '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.home_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
+
+    @skipIf(platform.system() != 'Windows', 'Windows-specific test')
+    def test_windows_env_existing(self):
+        home = '%HOMEDRIVE%%HOMEPATH%'
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
+            gc = gidopen.gidopen_in_view(view)
+            home_base = os.path.basename(self.home_present)
+
+            view.run_command(
+                'append', {'characters': home + '/' + home_base, 'force': True}
+            )
+            x, y = view.text_to_window(view.size() - 2)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_in_view')
+            self.assertTrue(gc.is_visible(event), (action, path))
+            self.assertEqual(
+                message,
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
             self.assertEqual(path, self.home_present)
@@ -336,11 +413,11 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
                 '{} {}:12'.format(
-                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
                 )
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -364,11 +441,11 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
                 '{} {}:12'.format(
-                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
                 )
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -394,11 +471,11 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
                 '{} {}:12:34'.format(
-                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
                 )
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -422,11 +499,11 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
                 '{} {}:12:34'.format(
-                    gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                    gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
                 )
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -453,10 +530,10 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
-                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.file_present))
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
             self.assertEqual(path, self.file_present)
@@ -481,10 +558,10 @@ class TestGidOpenPoint(TestCase):
             event = {'x': x, 'y': y}
             message = gc.description(event)
             action, path = view.settings().get('gidopen_in_view')
-            self.assertTrue(gc.is_visible(event))
+            self.assertTrue(gc.is_visible(event), (action, path))
             self.assertEqual(
                 message,
-                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.file_present))
             )
             self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
             self.assertEqual(path, self.file_present)
@@ -505,7 +582,7 @@ class TestGidOpenRegion(TestCase):
         self.also_present = os.path.join(self.tmpdir, 'also present')
         with open(self.also_present, 'w'):
             pass
-        home = os.environ['HOME']
+        home = os.path.expanduser('~')
         tilde_file = None
         for basename in os.listdir(home):
             if len(basename) > 2:
@@ -542,7 +619,7 @@ class TestGidOpenRegion(TestCase):
         action, path = self.view.settings().get('gidopen_in_view')
         self.assertEqual(action, None)
         self.assertEqual(path, None)
-        self.assertFalse(gc.is_visible(event))
+        self.assertFalse(gc.is_visible(event), (action, path))
 
     def test_absolute_path_nonexisting_file(self):
         gc = gidopen.gidopen_in_view(self.view)
@@ -557,13 +634,14 @@ class TestGidOpenRegion(TestCase):
         action, path = self.view.settings().get('gidopen_in_view')
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_NEW)
         self.assertEqual(path, self.file_absent)
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(message, '{} {}'.format(action, path))
+        self.assertTrue(gc.is_visible(event), (action, path))
+        self.assertEqual(message, '{} {}'.format(action, shorten_name(path)))
 
     def test_absolute_path_nonexisting_directory(self):
         gc = gidopen.gidopen_in_view(self.view)
 
-        foldername = '/tmp/noexist'
+        tmpdir = tempfile.gettempdir()
+        foldername = os.path.join(tmpdir, 'noexist')
         filename = os.path.join(foldername, 'file')
 
         self.view.run_command(
@@ -576,8 +654,8 @@ class TestGidOpenRegion(TestCase):
         action, path = self.view.settings().get('gidopen_in_view')
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FOLDER_NEW)
         self.assertEqual(path, foldername)
-        self.assertTrue(gc.is_visible(event))
-        self.assertEqual(message, '{} {}'.format(action, path))
+        self.assertTrue(gc.is_visible(event), (action, path))
+        self.assertEqual(message, '{} {}'.format(action, shorten_name(path)))
 
     def test_relative_path_nonexisting(self):
         gc = gidopen.gidopen_in_view(self.view)
@@ -589,8 +667,8 @@ class TestGidOpenRegion(TestCase):
         x, y = self.view.text_to_window(self.view.size() - 2)
         event = {'x': x, 'y': y}
         gc.description(event)
-        self.assertFalse(gc.is_visible(event))
         action, path = self.view.settings().get('gidopen_in_view')
+        self.assertFalse(gc.is_visible(event), (action, path))
         self.assertEqual(action, None)
         self.assertEqual(path, None)
 
@@ -606,10 +684,10 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.file_present)
-        self.assertEqual(message, '{} {}'.format(action, path))
+        self.assertEqual(message, '{} {}'.format(action, shorten_name(path)))
 
     def test_relative_path_existing(self):
         gc = gidopen.gidopen_in_view(self.view)
@@ -623,10 +701,10 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.file_present))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.file_present)
@@ -643,10 +721,10 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, self.file_present)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.file_present))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.file_present)
@@ -667,10 +745,10 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, tilde_file)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(tilde_file))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, tilde_file)
@@ -680,7 +758,7 @@ class TestGidOpenRegion(TestCase):
         home_base = os.path.basename(self.home_present)
 
         self.view.run_command(
-            'append', {'characters': '~/' + home_base, 'force': True}
+            'append', {'characters': '~' + os.sep + home_base, 'force': True}
         )
         self.view.sel().add(sublime.Region(0, self.view.size()))
 
@@ -688,20 +766,25 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.home_present)
 
     def test_unbraced_env_existing(self):
+        if platform.system() == 'Windows':
+            home = '$HOMEDRIVE$HOMEPATH'
+        else:
+            home = '$HOME'
+
         gc = gidopen.gidopen_in_view(self.view)
         home_base = os.path.basename(self.home_present)
 
         self.view.run_command(
-            'append', {'characters': '$HOME/' + home_base, 'force': True}
+            'append', {'characters': home + os.sep + home_base, 'force': True}
         )
         self.view.sel().add(sublime.Region(0, self.view.size()))
 
@@ -709,20 +792,25 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.home_present)
 
     def test_braced_env_existing(self):
+        if platform.system() == 'Windows':
+            home = '${HOMEDRIVE}${HOMEPATH}'
+        else:
+            home = '${HOME}'
+
         gc = gidopen.gidopen_in_view(self.view)
         home_base = os.path.basename(self.home_present)
 
         self.view.run_command(
-            'append', {'characters': '${HOME}/' + home_base, 'force': True}
+            'append', {'characters': home + os.sep + home_base, 'force': True}
         )
         self.view.sel().add(sublime.Region(0, self.view.size()))
 
@@ -730,13 +818,44 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
-            '{} ~/{}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, home_base)
+            '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
         self.assertEqual(path, self.home_present)
+
+    @skipIf(platform.system() != 'Windows', 'Windows-specific test')
+    def test_windows_env_existing(self):
+        home = '%HOMEDRIVE%%HOMEPATH%'
+        view = sublime.active_window().new_file()
+        try:
+            settings = view.settings()
+            settings.set(gidopen.SETTING_PWD, self.tmpdir)
+            gc = gidopen.gidopen_in_view(view)
+            home_base = os.path.basename(self.home_present)
+
+            view.run_command(
+                'append', {'characters': home + '/' + home_base, 'force': True}
+            )
+            self.view.sel().add(sublime.Region(0, self.view.size()))
+
+            x, y = view.text_to_window(view.size() - 2)
+            event = {'x': x, 'y': y}
+            message = gc.description(event)
+            action, path = view.settings().get('gidopen_in_view')
+            self.assertTrue(gc.is_visible(event), (action, path))
+            self.assertEqual(
+                message,
+                '{} {}'.format(gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.home_present))
+            )
+            self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
+            self.assertEqual(path, self.home_present)
+        finally:
+            view.set_scratch(True)
+            view.window().focus_view(view)
+            view.window().run_command("close_file")
 
     def test_click_after_space(self):
         gc = gidopen.gidopen_in_view(self.view)
@@ -750,11 +869,11 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}'.format(
-                gidopen.CONTEXT_ACTION_FILE_OPEN, self.also_present
+                gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.also_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
@@ -772,11 +891,11 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}'.format(
-                gidopen.CONTEXT_ACTION_FILE_OPEN, self.also_present
+                gidopen.CONTEXT_ACTION_FILE_OPEN, shorten_name(self.also_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_OPEN)
@@ -794,11 +913,11 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}:12'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -816,11 +935,11 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}:12'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -839,11 +958,11 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}:12:34'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
@@ -861,17 +980,18 @@ class TestGidOpenRegion(TestCase):
         event = {'x': x, 'y': y}
         message = gc.description(event)
         action, path = self.view.settings().get('gidopen_in_view')
-        self.assertTrue(gc.is_visible(event))
+        self.assertTrue(gc.is_visible(event), (action, path))
         self.assertEqual(
             message,
             '{} {}:12:34'.format(
-                gidopen.CONTEXT_ACTION_FILE_GOTO, self.file_present
+                gidopen.CONTEXT_ACTION_FILE_GOTO, shorten_name(self.file_present)
             )
         )
         self.assertEqual(action, gidopen.CONTEXT_ACTION_FILE_GOTO)
         self.assertEqual(path, self.file_present + ':12:34')
 
 
+@skipIf(platform.system() == 'Windows', 'Cannot set non-readable file on Windows')
 class TestPermissions(TestCase):
 
     def setUp(self):
@@ -889,7 +1009,7 @@ class TestPermissions(TestCase):
     def test_file_not_readable_point(self):
         with tempfile.NamedTemporaryFile() as f:
             os.chmod(f.name, 0o000)
-            assert not gidopen.is_readable_file(f.name)
+            assert not gidopen.is_readable(f.name)
             gc = gidopen.gidopen_in_view(self.view)
 
             self.view.run_command(
@@ -907,7 +1027,7 @@ class TestPermissions(TestCase):
     def test_file_not_readable_region(self):
         with tempfile.NamedTemporaryFile() as f:
             os.chmod(f.name, 0o000)
-            assert not gidopen.is_readable_file(f.name)
+            assert not gidopen.is_readable(f.name)
             gc = gidopen.gidopen_in_view(self.view)
 
             self.view.run_command(

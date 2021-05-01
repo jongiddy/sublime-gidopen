@@ -1,5 +1,6 @@
 import collections
 import os
+import platform
 import traceback
 
 import sublime  # type: ignore
@@ -16,6 +17,128 @@ CONTEXT_ACTION_FILE_GOTO = 'Goto'
 CONTEXT_ACTION_FILE_NEW = 'New File'
 CONTEXT_ACTION_FOLDER_NEW = 'Create Folder'
 
+if platform.system() == 'Windows':
+    def is_path_root(s):
+        # type: (str) -> bool
+        if len(s) == 1:
+            return s in '\\/'
+        if s[1] == ':':
+            return len(s) == 3 and s[2] in '\\/'
+        return False
+
+    def is_path_sep(c):
+        # type: (str) -> bool
+        return c in '\\/'
+
+    def get_home():
+        # type: () -> AbsolutePath
+        return AbsolutePath(os.environ['HOMEDRIVE'] + os.environ['HOMEPATH'])
+
+    def expanduser(path):
+        # type: (str) -> str
+        # On Linux `os.path.expanduser` only resolves tilde paths if the user
+        # exists.  On Windows it returns the path that would be the user's home
+        # directory even if the user and directory do not exist.  This function
+        # makes it uniform: tilde directories only resolve if the directory
+        # exists.
+        if not path or path[0] != '~':
+            return path
+        idx = 1
+        while idx < len(path) and not is_path_sep(path[idx]):
+            idx += 1
+        d = os.path.expanduser(path[:idx])
+        if os.path.isdir(d):
+            return os.path.expanduser(path)
+        else:
+            return path
+else:
+    assert os.sep == '/'
+
+    def is_path_root(s):
+        # type: (str) -> bool
+        return s == '/'
+
+    def is_path_sep(c):
+        # type: (str) -> bool
+        return c == '/'
+
+    def get_home():
+        # type: () -> AbsolutePath
+        return AbsolutePath(os.environ['HOME'])
+
+    def expanduser(path):
+        # type: (str) -> str
+        return os.path.expanduser(path)
+
+
+# Any section of a path, to allow path-like comparison.
+class PartialPath(object):
+
+    def __init__(self, path):
+        # type: (str) -> None
+        self.path = path
+        self.norm = self.normalize(path)
+        self.canonical = os.path.normcase(self.norm)
+
+    def normalize(self, path):
+        # type: (str) -> str
+        if path:
+            return os.path.normpath(path)
+        return path
+
+    def __str__(self):
+        # type: () -> str
+        return self.path
+
+    def __len__(self):
+        # type: () -> int
+        return len(self.path)
+
+    def __hash__(self):
+        # type: () -> int
+        return hash(self.canonical)
+
+    def __eq__(self, other):
+        # type: (object) -> bool
+        if not isinstance(other, PartialPath):
+            return NotImplemented
+        return self.canonical == other.canonical
+
+    def canonical_len(self):
+        # type: () -> int
+        return len(self.canonical)
+
+
+class AbsolutePath(PartialPath):
+
+    def normalize(self, path):
+        # type: (str) -> str
+        return expanduser(super().normalize(path))
+
+    def __lt__(self, other):
+        # type: (object) -> bool
+        # `self < other` indicates that `self` is an ancestor of `other`.
+        if not isinstance(other, AbsolutePath):
+            return NotImplemented
+        prefix = self.canonical + os.sep
+        return other.canonical.startswith(prefix)
+
+    def __le__(self, other):
+        # type: (object) -> bool
+        return self == other or self < other
+
+    def is_root(self):
+        # type: () -> bool
+        return is_path_root(self.canonical)
+
+    def basepath(self):
+        # type: () -> str
+        return os.path.basename(self.norm)
+
+    def canonical_base(self):
+        # type: () -> str
+        return os.path.basename(self.canonical)
+
 
 def is_likely_path_char(c):
     # type: (str) -> bool
@@ -26,6 +149,7 @@ def is_likely_path_char(c):
         # = is in to make ENVNAME=PATH isolate PATH
         # (#) are in to make [AWS](docs/install.md#aws) isolate path
         # ${} are out to make $ENVNAME and ${ENVNAME} part of path
+        # % is out to make %ENVNAME% part of path
         return False
     return True
 
@@ -83,8 +207,8 @@ class TextFound(Candidate):
 
 def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
     # (str, Callable[[], Iterator[str]], sublime.Region) -> Iterator[Candidate]
-    path = os.path.expanduser(text)
-    expanded = os.path.expanduser(
+    path = expanduser(text)
+    expanded = expanduser(
         os.path.expandvars(text)
     )
     if path != expanded:
@@ -101,12 +225,13 @@ def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
             else:
                 path = os.path.dirname(path)
                 parent = os.path.dirname(path)
-                while parent != path and not os.path.isdir(parent):
+                while not is_path_root(path) and not os.path.isdir(parent):
                     path = parent
                     parent = os.path.dirname(path)
                 yield FolderNotFound(region, path)
         else:
             for folder in folder_iterate():
+                folder = str(folder)
                 abspath = os.path.normpath(os.path.join(folder, path))
                 if is_file(abspath):
                     if is_readable(abspath):
@@ -129,12 +254,13 @@ def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
         else:
             path = os.path.dirname(expanded)
             parent = os.path.dirname(path)
-            while parent != path and not os.path.isdir(parent):
+            while not is_path_root(path) and not os.path.isdir(parent):
                 path = parent
                 parent = os.path.dirname(path)
             yield FolderNotFound(region, path)
     else:
         for folder in folder_iterate():
+            folder = str(folder)
             abspath = os.path.normpath(os.path.join(folder, expanded))
             if is_file(abspath):
                 if is_readable(abspath):
@@ -297,73 +423,62 @@ def get_line_col(view, pos):
     return None
 
 
-def is_in(descendent, ancestor):
-    # type: (str, str) -> bool
-    assert descendent != ancestor
-    return (
-        descendent.startswith(ancestor)
-        and descendent[len(ancestor)] == os.sep
-    )
-
-
 class gidopen_in_view(sublime_plugin.TextCommand):
 
     def __init__(self, view):
         # type: (sublime.View) -> None
         super().__init__(view)
-        self._home = None  # type: str|None
-        self._folders = None  # type: list[str]|None
-        self._pwd = None  # type: str|None
-        self._labels = None  # type: dict[str, str]|None
+        self._home = None  # type: AbsolutePath|None
+        self._folders = None  # type: list[AbsolutePath]|None
+        self._pwd = None  # type: AbsolutePath|None
+        self._labels = None  # type: dict[AbsolutePath, str]|None
         self._folder_excludes = self.view.settings().get(
             'folder_exclude_patterns'
         )
 
     def _get_home(self):
-        # type: () -> str
+        # type: () -> AbsolutePath
         if self._home is None:
-            self._home = os.environ.get('HOME', '/')
+            self._home = get_home()
         assert self._home is not None
         return self._home
 
     def _setup_folders(self):
-        # type: () -> tuple[str, list[str], dict[str, str]]
+        # type: () -> tuple[AbsolutePath, list[AbsolutePath], dict[AbsolutePath, str]]
         if self._pwd is None:
             self._folder_excludes = self.view.settings().get(
                 'folder_exclude_patterns'
             )
             window = self.view.window()
             winvar = window.extract_variables()
-            window_folders = window.folders()
-            folders = []  # type: list[str]
-            labels = {}  # type: dict[str, str]
+            window_folders = [AbsolutePath(f) for f in window.folders()]
+            folders = []  # type: list[AbsolutePath]
+            labels = {}  # type: dict[AbsolutePath, str]
             count = collections.defaultdict(int)  # type: dict[str, int]
             for after, folder in enumerate(window_folders, start=1):
-                basename = os.path.basename(folder)
-                count[basename] += 1
-                if any(folder == f or is_in(folder, f) for f in folders):
+                count[folder.canonical_base()] += 1
+                if any(f <= folder for f in folders):
                     # If a parent of this folder has appeared, do not keep
                     pass
-                elif any(is_in(folder, f) for f in window_folders[after:]):
+                elif any(f < folder for f in window_folders[after:]):
                     # If a parent of this folder is yet to come, do not keep
                     pass
                 else:
                     folders.append(folder)
             for folder in folders:
-                basename = os.path.basename(folder)
-                if count[basename] == 1:
-                    labels[folder] = basename
+                if count[folder.canonical_base()] == 1:
+                    labels[folder] = folder.basepath()
             pwd = self.view.settings().get(SETTING_PWD)
             if pwd is not None:
-                pwd = os.path.expanduser(pwd)
+                pwd = expanduser(pwd)
                 if os.path.isabs(pwd) and os.path.isdir(pwd):
-                    pwd = os.path.normpath(pwd)
+                    pwd = AbsolutePath(pwd)
                 else:
                     pwd = None
             if pwd is None:
                 file = winvar.get('file')
                 if file is not None:
-                    pwd = os.path.dirname(file)
+                    pwd = AbsolutePath(os.path.dirname(file))
                 elif folders:
                     pwd = folders[0]
                 else:
@@ -387,9 +502,9 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         pwd_in_folder = False
         for folder in folders:
             yield folder
-            if pwd == folder:
+            if folder == pwd:
                 pwd_is_folder = True
-            elif is_in(pwd, folder):
+            elif folder < pwd:
                 pwd_in_folder = True
         if pwd_in_folder:
             if yield_pwd_in_folder:
@@ -399,15 +514,20 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                 yield pwd
 
     def _get_pwd(self):
-        # type: () -> str
+        # type: () -> AbsolutePath
         pwd, folders, labels = self._setup_folders()
         return pwd
 
     def _expand_right(self, prefix_region, suffix):
-        # type: (sublime.Region, str) -> sublime.Region|None
+        # type: (sublime.Region, PartialPath) -> sublime.Region|None
         begin = prefix_region.end()
-        end = begin + len(suffix)
-        if suffix == self.view.substr(sublime.Region(begin, end)):
+        end = begin + suffix.canonical_len()
+        print(repr(suffix.path), repr(suffix.canonical), suffix.canonical_len())
+        partial = PartialPath(self.view.substr(sublime.Region(begin, end)))
+        while end < self.view.size() and partial.canonical_len() < suffix.canonical_len():
+            end += 1
+            partial = PartialPath(self.view.substr(sublime.Region(begin, end)))
+        if partial == suffix:
             return sublime.Region(prefix_region.begin(), end)
         return None
 
@@ -420,13 +540,10 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                 dirname = dirnames[i]
                 path = os.path.join(dirpath, dirname)
                 if dirname in self._folder_excludes:
-                    print(
-                        'GidOpen: - skip',
-                        self._shorten_name(path),
-                    )
+                    print('GidOpen: - skip', self._shorten_name(path))
                     del dirnames[i]
                 else:
-                    region = self._expand_right(folder_region, path[dlen:])
+                    region = self._expand_right(folder_region, PartialPath(path[dlen:]))
                     if region:
                         yield FolderFound(region, path)
                         # descend into this folder
@@ -437,7 +554,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
-                region = self._expand_right(folder_region, path[dlen:])
+                region = self._expand_right(folder_region, PartialPath(path[dlen:]))
                 if region:
                     if is_readable(path):
                         yield FileFound(region, path)
@@ -447,16 +564,17 @@ class gidopen_in_view(sublime_plugin.TextCommand):
     def all_files_prefixed_by(self, prefix, prefix_region):
         # (str, sublime.Region) -> Generator[Candidate, None, bool]
         # yield all filesystem paths that start with the
-        # path `prefix`. The prefix ends at position `end`.
+        # path `prefix`. The prefix ends at `prefix_region.end()`.
         found = False
         assert os.path.isabs(prefix)
         # split into dirname and basename prefix
         d, p = os.path.split(prefix)
         if os.path.isdir(d):
+            name_prefix = os.path.normcase(p)
             for name in os.listdir(d):
-                if name.startswith(p):
+                if os.path.normcase(name).startswith(name_prefix):
                     path = os.path.join(d, name)
-                    suffix = path[len(prefix):]
+                    suffix = PartialPath(path[len(prefix):])
                     region = self._expand_right(prefix_region, suffix)
                     if region:
                         if os.path.isdir(path):
@@ -465,7 +583,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                             else:
                                 found = True
                                 yield FolderFound(region, path)
-                                if self.view.substr(region.end()) == '/':
+                                if is_path_sep(self.view.substr(region.end())):
                                     yield from self.all_matching_descendants(
                                         path, region
                                     )
@@ -488,7 +606,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         elif path[0] == '~':
             # Looks like a tilde expanded absolute path.
             print('GidOpen: - absolute')
-            expanded = os.path.expanduser(path)
+            expanded = expanduser(path)
             if expanded != path:
                 # If path starts with '~alice' but user `alice` does not exist,
                 # then `expanduser` keeps the path as '~alice', in which case
@@ -528,15 +646,21 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
         # Trailing dots and slashes are generally not useful for matching.
         path = path.rstrip('/.')
-        end = region.begin() + len(path)
-        region = sublime.Region(begin, end)
-
-        if end == begin:
+        if not path:
             return
+        end = begin + len(path)
+        region = sublime.Region(begin, end)
 
         basename = os.path.basename(path)
 
         print('GidOpen: looking for %r' % path)
+
+        if platform.system() == 'Windows' and begin >= 2 and self.view.substr(begin - 1) == ':':
+            driveregion = sublime.Region(begin - 2, region.end())
+            drivepath = self.view.substr(driveregion)
+            found = yield from self.check_absolute_path(driveregion, drivepath)
+            if found:
+                return
 
         found = yield from self.check_absolute_path(region, path)
         if found:
@@ -576,12 +700,14 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                     do_yield = False
                     begin = region.begin()
                     if begin == 2:
-                        s = self.view.substr(sublime.Region(0, 2))
-                        if s == './':
+                        if self.view.substr(0) == '.' and is_path_sep(self.view.substr(1)):
                             do_yield = True
                     elif begin > 2:
-                        s = self.view.substr(sublime.Region(begin - 3, begin))
-                        if s[1:] == './' and not is_likely_path_char(s[0]):
+                        if (
+                            not is_likely_path_char(self.view.substr(begin - 3))
+                            and self.view.substr(begin - 2) == '.'
+                            and is_path_sep(self.view.substr(begin - 1))
+                        ):
                             do_yield = True
                 else:
                     candidate.region = region
@@ -597,13 +723,14 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         # find the matching directories, updating the region.
         match_start = region.begin()
         pos = match_start - 1
-        while dirname != '/' and pos >= 0 and self.view.substr(pos) == '/':
-            if pos >= 1 and self.view.substr(pos - 1) == '/':
+        while not is_path_root(dirname) and pos >= 0 and is_path_sep(self.view.substr(pos)):
+            if pos >= 1 and is_path_sep(self.view.substr(pos - 1)):
                 pos -= 1
                 continue
             if (
                 pos >= 2
-                and self.view.substr(sublime.Region(pos - 2, pos)) == '/.'
+                and is_path_sep(self.view.substr(sublime.Region(pos - 2, pos - 1)))
+                and self.view.substr(pos - 1) == '.'
             ):
                 pos -= 2
                 continue
@@ -611,7 +738,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
             blen = len(basename)
             if pos < blen:
                 break
-            if self.view.substr(sublime.Region(pos - blen, pos)) != basename:
+            if PartialPath(self.view.substr(sublime.Region(pos - blen, pos))) != PartialPath(basename):
                 break
             match_start = pos - blen
             pos = match_start - 1
@@ -619,21 +746,23 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
     def _search_contains(self, region, basename):
         # (sublime.Region, str) -> Iterator[Candidate]
+        basename_normcase = os.path.normcase(basename)
         begin = region.begin()
         for folder in self._folder_iterate():
+            folder = str(folder)
             print('GidOpen: - in', self._shorten_name(folder))
             for name in os.listdir(folder):
                 fullpath = os.path.join(folder, name)
-                for idx in find_all(basename, name):
+                for idx in find_all(basename_normcase, os.path.normcase(name)):
                     # matched name starts `idx` chars before basename
                     text_start = begin - idx
                     text_end = text_start + len(name)
                     text_region = sublime.Region(text_start, text_end)
                     text = self.view.substr(text_region)
-                    if text == name:
+                    if PartialPath(text) == PartialPath(name):
                         if os.path.isdir(fullpath):
                             yield FolderFound(text_region, fullpath)
-                            if self.view.substr(text_end) == '/':
+                            if is_path_sep(self.view.substr(text_end)):
                                 yield from self.all_matching_descendants(
                                     fullpath, text_region
                                 )
@@ -646,14 +775,16 @@ class gidopen_in_view(sublime_plugin.TextCommand):
     def _search_prefix(self, region, basename):
         # (sublime.Region, str) -> Iterator[Candidate]
         # First, search in the folders and pwd
+        basename_normcase = os.path.normcase(basename)
         for folder in self._folder_iterate():
+            folder = str(folder)
             print('GidOpen: - in', self._shorten_name(folder))
             if os.path.isdir(folder):
                 prefix = os.path.join(folder, basename)
                 for name in os.listdir(folder):
-                    if name.startswith(basename):
+                    if os.path.normcase(name).startswith(basename_normcase):
                         path = os.path.join(folder, name)
-                        suffix = path[len(prefix):]
+                        suffix = PartialPath(path[len(prefix):])
                         cregion = self._expand_right(region, suffix)
                         if cregion:
                             if os.path.isdir(path):
@@ -671,9 +802,10 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         home = self._get_home()
         pwd = self._get_pwd()
         for folder in self._folder_iterate(yield_pwd_in_folder=False):
-            if folder == home or is_in(home, folder):
+            if folder <= home:
                 # too big to search recursively
                 continue
+            folder = str(folder)
 
             print('GidOpen: - under', self._shorten_name(folder))
             for dirpath, dirnames, filenames in os.walk(folder):
@@ -681,7 +813,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                 while i < len(dirnames):
                     dirname = dirnames[i]
                     path = os.path.join(dirpath, dirname)
-                    if path == pwd:
+                    if AbsolutePath(path) == pwd:
                         # already searched in pwd, but still need to
                         # search below pwd, so keep in dirnames
                         i += 1
@@ -703,23 +835,25 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         # type: (str) -> bool
         pwd, folders, labels = self._setup_folders()
         for folder in folders:
-            if name == folder or is_in(name, folder):
+            if folder <= name:
                 return True
         return False
 
     def _shorten_name(self, name):
         # type: (str) -> str
+        path = AbsolutePath(name)
         pwd, folders, labels = self._setup_folders()
 
         for folder in folders:
-            if name == folder or is_in(name, folder):
+            if folder <= path:
                 label = labels.get(folder)
                 if label is not None:
                     return '{}{}'.format(label, name[len(folder):])
 
-        home = self._get_home()
-        if home != '/' and name != home and is_in(name, home):
-            return '~' + name[len(home):]
+        if platform.system() != 'Windows':
+            home = self._get_home()
+            if not home.is_root() and home < path:
+                return '~' + name[len(home):]
 
         return name
 
@@ -850,45 +984,43 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         super().__init__(window)
         self.action = None  # type: str|None
         self.path = ''
-        self._home = None  # type: str|None
-        self._pwd = None  # type: str|None
-        self._folders = None  # type: list[str]|None
-        self._labels = None  # type: dict[str, str]|None
+        self._home = None  # type: AbsolutePath|None
+        self._pwd = None  # type: AbsolutePath|None
+        self._folders = None  # type: list[AbsolutePath]|None
+        self._labels = None  # type: dict[AbsolutePath, str]|None
 
     def _get_home(self):
-        # type: () -> str
+        # type: () -> AbsolutePath
         if self._home is None:
-            self._home = os.environ.get('HOME', '/')
+            self._home = get_home()
         assert self._home is not None
         return self._home
 
     def _setup_folders(self):
-        # type: () -> tuple[str, list[str], dict[str, str]]
+        # type: () -> tuple[AbsolutePath, list[AbsolutePath], dict[AbsolutePath, str]]
         if self._pwd is None:
-            window = self.window
+            window = self.window()
             winvar = window.extract_variables()
-            window_folders = window.folders()
-            folders = []  # type: list[str]
-            labels = {}  # type: dict[str, str]
+            window_folders = [AbsolutePath(f) for f in window.folders()]
+            folders = []  # type: list[AbsolutePath]
+            labels = {}  # type: dict[AbsolutePath, str]
             count = collections.defaultdict(int)  # type: dict[str, int]
             for after, folder in enumerate(window_folders, start=1):
-                basename = os.path.basename(folder)
-                count[basename] += 1
-                if any(folder == f or is_in(folder, f) for f in folders):
+                count[folder.canonical_base()] += 1
+                if any(folder >= f for f in folders):
                     # If a parent of this folder has appeared, do not keep
                     pass
-                elif any(is_in(folder, f) for f in window_folders[after:]):
+                elif any(folder > f for f in window_folders[after:]):
                     # If a parent of this folder is yet to come, do not keep
                     pass
                 else:
                     folders.append(folder)
             for folder in folders:
-                basename = os.path.basename(folder)
-                if count[basename] == 1:
-                    labels[folder] = basename
+                if count[folder.canonical_base()] == 1:
+                    labels[folder] = folder.basepath()
             file = winvar.get('file')
             if file is not None:
-                pwd = os.path.dirname(file)
+                pwd = AbsolutePath(os.path.dirname(file))
             elif folders:
                 pwd = folders[0]
             else:
@@ -912,9 +1044,9 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         pwd_in_folder = False
         for folder in folders:
             yield folder
-            if pwd == folder:
+            if folder == pwd:
                 pwd_is_folder = True
-            elif is_in(pwd, folder):
+            elif folder < pwd:
                 pwd_in_folder = True
         if pwd_in_folder:
             if yield_pwd_in_folder:
@@ -930,7 +1062,7 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         # type: (str) -> bool
         pwd, folders, labels = self._setup_folders()
         for folder in folders:
-            if name == folder or is_in(name, folder):
+            if folder <= name:
                 return True
         return False
 
@@ -939,14 +1071,15 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
         pwd, folders, labels = self._setup_folders()
 
         for folder in folders:
-            if name == folder or is_in(name, folder):
+            if folder <= name:
                 label = labels.get(folder)
                 if label is not None:
                     return '{}{}'.format(label, name[len(folder):])
 
-        home = self._get_home()
-        if home != '/' and name != home and is_in(name, home):
-            return '~' + name[len(home):]
+        if platform.system() != 'Windows':
+            home = self._get_home()
+            if not home.is_root() and home < name:
+                return '~' + name[len(home):]
 
         return name
 
