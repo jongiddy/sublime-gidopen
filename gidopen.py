@@ -1,6 +1,7 @@
 import collections
 import os
 import platform
+from time import time
 import traceback
 
 import sublime  # type: ignore
@@ -563,7 +564,6 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         # yield all filesystem paths that start with the
         # path `prefix`. The prefix ends at `prefix_region.end()`.
         found = False
-        assert os.path.isabs(prefix)
         # split into dirname and basename prefix
         d, p = os.path.split(prefix)
         if os.path.isdir(d):
@@ -581,9 +581,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                                 found = True
                                 yield FolderFound(region, path)
                                 if is_path_sep(self.view.substr(region.end())):
-                                    yield from self.all_matching_descendants(
-                                        path, region
-                                    )
+                                    yield from self.all_matching_descendants(path, region)
                         else:
                             if is_readable(path):
                                 found = True
@@ -597,9 +595,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         found = False
         if os.path.isabs(path):
             print('GidOpen: - absolute')
-            found = yield from self.all_files_prefixed_by(
-                os.path.normpath(path), region
-            )
+            found = yield from self.all_files_prefixed_by(os.path.normpath(path), region)
         elif path[0] == '~':
             # Looks like a tilde expanded absolute path.
             print('GidOpen: - absolute')
@@ -772,6 +768,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
     def _search_prefix(self, region, basename):
         # (sublime.Region, str) -> Iterator[Candidate]
         # First, search in the folders and pwd
+        start = time()
         basename_normcase = os.path.normcase(basename)
         for folder in self._folder_iterate():
             folder = str(folder)
@@ -806,6 +803,10 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
             print('GidOpen: - under', self._shorten_name(folder))
             for dirpath, dirnames, filenames in os.walk(folder):
+                if time() - start >= 1:
+                    # Give up after 1 second to avoid menu failing to appear
+                    print('GidOpen: - timeout')
+                    return
                 i = 0
                 while i < len(dirnames):
                     dirname = dirnames[i]
@@ -815,10 +816,7 @@ class gidopen_in_view(sublime_plugin.TextCommand):
                         # search below pwd, so keep in dirnames
                         i += 1
                     elif dirname in self._folder_excludes:
-                        print(
-                            'GidOpen: - skip',
-                            self._shorten_name(path)
-                        )
+                        print('GidOpen: - skip', self._shorten_name(path))
                         del dirnames[i]
                     else:
                         path = os.path.join(path, basename)
