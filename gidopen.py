@@ -116,7 +116,7 @@ class AbsolutePath(PartialPath):
         return expanduser(super().normalize(path))
 
     def __lt__(self, other):
-        # type: (object) -> bool
+        # type: (AbsolutePath) -> bool
         # `self < other` indicates that `self` is an ancestor of `other`.
         if not isinstance(other, AbsolutePath):
             return NotImplemented
@@ -124,7 +124,7 @@ class AbsolutePath(PartialPath):
         return other.canonical.startswith(prefix)
 
     def __le__(self, other):
-        # type: (object) -> bool
+        # type: (AbsolutePath) -> bool
         return self == other or self < other
 
     def is_root(self):
@@ -208,9 +208,7 @@ class TextFound(Candidate):
 def candidates_from_string(text, folder_iterate, region=sublime.Region(0, 0)):
     # (str, Callable[[], Iterator[str]], sublime.Region) -> Iterator[Candidate]
     path = expanduser(text)
-    expanded = expanduser(
-        os.path.expandvars(text)
-    )
+    expanded = expanduser(os.path.expandvars(text))
     if path != expanded:
         if os.path.isabs(path):
             if is_file(path):
@@ -522,7 +520,6 @@ class gidopen_in_view(sublime_plugin.TextCommand):
         # type: (sublime.Region, PartialPath) -> sublime.Region|None
         begin = prefix_region.end()
         end = begin + suffix.canonical_len()
-        print(repr(suffix.path), repr(suffix.canonical), suffix.canonical_len())
         partial = PartialPath(self.view.substr(sublime.Region(begin, end)))
         while end < self.view.size() and partial.canonical_len() < suffix.canonical_len():
             end += 1
@@ -833,9 +830,10 @@ class gidopen_in_view(sublime_plugin.TextCommand):
 
     def _folder_in_project(self, name):
         # type: (str) -> bool
+        path = AbsolutePath(name)
         pwd, folders, labels = self._setup_folders()
         for folder in folders:
-            if folder <= name:
+            if folder <= path:
                 return True
         return False
 
@@ -1060,25 +1058,27 @@ class gidopen_in_window(sublime_plugin.WindowCommand):
 
     def _folder_in_project(self, name):
         # type: (str) -> bool
+        path = AbsolutePath(name)
         pwd, folders, labels = self._setup_folders()
         for folder in folders:
-            if folder <= name:
+            if folder <= path:
                 return True
         return False
 
     def _shorten_name(self, name):
         # type: (str) -> str
+        path = AbsolutePath(name)
         pwd, folders, labels = self._setup_folders()
 
         for folder in folders:
-            if folder <= name:
+            if folder <= path:
                 label = labels.get(folder)
                 if label is not None:
                     return '{}{}'.format(label, name[len(folder):])
 
         if platform.system() != 'Windows':
             home = self._get_home()
-            if not home.is_root() and home < name:
+            if not home.is_root() and home < path:
                 return '~' + name[len(home):]
 
         return name
